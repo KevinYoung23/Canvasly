@@ -1,0 +1,27 @@
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Canvasly AI HTML Editor",
+  description:
+    "A visual, conversational HTML editor with element selection, region annotation, drawing, image references, and bring-your-own-model support.",
+  other: {
+    "codex-preview": "development",
+  },
+  icons: {
+    icon: "/favicon.svg",
+    shortcut: "/favicon.svg",
+  },
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="zh-CN">
+      <body>{children}</body>
+    </html>
+  );
+}

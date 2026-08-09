@@ -1,0 +1,38 @@
+services:
+  canvasly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${CANVASLY_PORT:-4173}:3000"
+    environment:
+      ALLOW_PRIVATE_LLM_ENDPOINTS: "${ALLOW_PRIVATE_LLM_ENDPOINTS:-true}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  copilot-bridge:
+    profiles: ["copilot"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["npm", "run", "copilot:bridge"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      COPILOT_BRIDGE_PORT: "4141"
+    ports:
+      - "${COPILOT_BRIDGE_PORT:-4141}:4141"
+    restart: unless-stopped
