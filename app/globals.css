@@ -980,6 +980,69 @@ textarea:focus-visible {
   border-bottom: 1px solid var(--soft-line);
 }
 
+.collaboration-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #dfe5e1;
+  border-radius: 8px;
+  background: #eef2f0;
+}
+
+.collaboration-switch button {
+  height: 29px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #7a8580;
+  font-size: 9.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.collaboration-switch button.active {
+  background: white;
+  color: #27302c;
+  box-shadow: 0 2px 7px rgba(30, 43, 36, 0.08);
+}
+
+.collaboration-switch button:first-child.active svg {
+  color: var(--signal);
+}
+
+.collaboration-switch button:last-child.active svg {
+  color: var(--accent);
+}
+
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.code-view-toggle {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #777f7b;
+  cursor: pointer;
+}
+
+.code-view-toggle:hover,
+.code-view-toggle.active {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
 .panel-tabs {
   display: flex;
   align-items: center;

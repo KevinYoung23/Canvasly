@@ -57,6 +57,7 @@ import {
 type ToolMode = "interact" | "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
 type PanelTab = "chat" | "code";
+type CollaborationMode = "cowork" | "chat";
 
 type Rect = {
   x: number;
@@ -169,13 +170,29 @@ const DEVICE_SIZES: Record<DeviceMode, { width: number; height: number }> = {
   mobile: { width: 390, height: 720 },
 };
 
-const INITIAL_MESSAGES: ChatMessage[] = [
+const INITIAL_COWORK_MESSAGES: ChatMessage[] = [
   {
-    id: "welcome",
+    id: "cowork-welcome",
     role: "assistant",
     text: "画布已经就绪。下一步想让它变成什么样？",
     detail: "当前模型 · Canvasly Demo",
   },
+];
+
+const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
+  {
+    id: "chat-welcome",
+    role: "assistant",
+    text: "我们可以先聊清楚方向、内容和取舍。Chat 模式不会修改画布。",
+    detail: "对话建议 · 当前页面作为上下文",
+  },
+];
+
+const CHAT_SUGGESTIONS = [
+  "这个页面目前最需要改进什么？",
+  "帮我梳理信息层级",
+  "这个视觉方向适合什么用户？",
+  "给我三个可选的优化方向",
 ];
 
 const initialProvider = PROVIDERS[0];
@@ -1145,6 +1162,8 @@ export default function Home() {
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [device, setDevice] = useState<DeviceMode>("desktop");
   const [panelTab, setPanelTab] = useState<PanelTab>("chat");
+  const [collaborationMode, setCollaborationMode] =
+    useState<CollaborationMode>("cowork");
   const [panelOpen, setPanelOpen] = useState(true);
   const [canvasScale, setCanvasScale] = useState(1);
   const [history, setHistory] = useState<string[]>([STARTER_HTML]);
@@ -1164,7 +1183,10 @@ export default function Home() {
   const [savedMoveHtml, setSavedMoveHtml] = useState<string | null>(null);
   const [regionRect, setRegionRect] = useState<Rect | null>(null);
   const [drawPoints, setDrawPoints] = useState<Point[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
+  const [coworkMessages, setCoworkMessages] =
+    useState<ChatMessage[]>(INITIAL_COWORK_MESSAGES);
+  const [chatMessages, setChatMessages] =
+    useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES);
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isWorking, setIsWorking] = useState(false);
@@ -1206,6 +1228,10 @@ export default function Home() {
   const canRedo = historyIndex < history.length - 1;
   const hasPendingCodeDraft = codeDraft !== currentHtml;
   const hasStagedMoves = stagedMoves.length > 0;
+  const messages =
+    collaborationMode === "cowork" ? coworkMessages : chatMessages;
+  const setMessages =
+    collaborationMode === "cowork" ? setCoworkMessages : setChatMessages;
   const hasUnsavedChanges =
     currentHtml !== savedHtml || hasPendingCodeDraft || hasStagedMoves;
 
@@ -1936,8 +1962,15 @@ export default function Home() {
     setAttachments((items) => items.filter((item) => item.id !== id));
   };
 
+  const switchCollaborationMode = (mode: CollaborationMode) => {
+    setCollaborationMode(mode);
+    setPanelTab("chat");
+    setPanelOpen(true);
+    setPrompt("");
+  };
+
   const sendPrompt = async () => {
-    if (hasStagedMoves) {
+    if (hasStagedMoves && collaborationMode === "cowork") {
       showToast("请先确认或放弃移动草稿");
       return;
     }
@@ -1959,6 +1992,46 @@ export default function Home() {
     setIsWorking(true);
 
     try {
+      if (collaborationMode === "chat") {
+        let reply: string;
+        if (modelConfig.protocol === "demo") {
+          await new Promise((resolve) => window.setTimeout(resolve, 420));
+          reply = selection
+            ? `可以。当前上下文是「${selection.label}」。我们可以先讨论它的信息、视觉层级和交互目标；Chat 模式不会直接修改画布。`
+            : "可以。我们可以从目标用户、信息层级、视觉方向或实现取舍开始讨论；Chat 模式不会直接修改画布。";
+        } else {
+          const response = await fetch("/api/transform", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              mode: "chat",
+              config: modelConfig,
+              html: currentHtml,
+              instruction: finalInstruction,
+              selection: selectedContext,
+              attachments: sentAttachments,
+            }),
+          });
+          const payload = (await response.json()) as {
+            reply?: string;
+            error?: string;
+          };
+          if (!response.ok || !payload.reply) {
+            throw new Error(payload.error || "模型没有返回可用的回复");
+          }
+          reply = payload.reply;
+        }
+        setMessages((items) => [
+          ...items,
+          {
+            id: makeId("chat-assistant"),
+            role: "assistant",
+            text: reply,
+          },
+        ]);
+        return;
+      }
+
       let result: { html: string; summary: string; insertionApplied?: boolean };
       if (prepared.insertionRequested && !prepared.insertionExpected) {
         throw new Error("无法确定这个位置的安全插入边界。请缩小圈选范围，或直接选中目标容器后重试。");
@@ -1975,6 +2048,7 @@ export default function Home() {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
+              mode: "cowork",
               config: modelConfig,
               html: prepared.html,
               instruction: requestInstruction,
@@ -2126,7 +2200,10 @@ export default function Home() {
     setProjectBaseline(replacement.html);
     setSavedHtml(replacement.html);
     setProjectName(replacement.name);
-    setMessages([{ ...INITIAL_MESSAGES[0], detail: replacement.detail }]);
+    setCoworkMessages([
+      { ...INITIAL_COWORK_MESSAGES[0], detail: replacement.detail },
+    ]);
+    setChatMessages(INITIAL_CHAT_MESSAGES);
     setPrompt("");
     setAttachments([]);
     setPanelOpen(true);
@@ -2199,7 +2276,8 @@ export default function Home() {
     setHistory([projectBaseline]);
     setHistoryIndex(0);
     setCodeDraft(projectBaseline);
-    setMessages(INITIAL_MESSAGES);
+    setCoworkMessages(INITIAL_COWORK_MESSAGES);
+    setChatMessages(INITIAL_CHAT_MESSAGES);
     setPrompt("");
     setAttachments([]);
     clearSelection();
@@ -2445,11 +2523,36 @@ export default function Home() {
 
         <aside className={`ai-panel ${panelOpen ? "open" : ""}`}>
           <div className="panel-header">
-            <div className="panel-tabs">
-              <button className={panelTab === "chat" ? "active" : ""} onClick={() => setPanelTab("chat")} type="button"><MessageSquare size={15} />智能编辑</button>
-              <button className={panelTab === "code" ? "active" : ""} onClick={() => setPanelTab("code")} type="button"><Code2 size={15} />HTML</button>
+            <div className="collaboration-switch" role="group" aria-label="协作模式">
+              <button
+                className={collaborationMode === "cowork" ? "active" : ""}
+                onClick={() => switchCollaborationMode("cowork")}
+                type="button"
+              >
+                <Wand2 size={14} />Cowork
+              </button>
+              <button
+                className={collaborationMode === "chat" ? "active" : ""}
+                onClick={() => switchCollaborationMode("chat")}
+                type="button"
+              >
+                <MessageSquare size={14} />Chat
+              </button>
             </div>
-            <button className="panel-close" onClick={() => setPanelOpen(false)} aria-label="关闭面板" type="button"><X size={17} /></button>
+            <div className="panel-header-actions">
+              {collaborationMode === "cowork" && (
+                <button
+                  className={`code-view-toggle ${panelTab === "code" ? "active" : ""}`}
+                  onClick={() => setPanelTab((tab) => tab === "code" ? "chat" : "code")}
+                  aria-label={panelTab === "code" ? "返回 Cowork" : "查看 HTML"}
+                  title={panelTab === "code" ? "返回 Cowork" : "查看 HTML"}
+                  type="button"
+                >
+                  <Code2 size={16} />
+                </button>
+              )}
+              <button className="panel-close" onClick={() => setPanelOpen(false)} aria-label="关闭面板" type="button"><X size={17} /></button>
+            </div>
           </div>
 
           {panelTab === "chat" ? (
@@ -2458,8 +2561,12 @@ export default function Home() {
                 <div className="context-banner">
                   <div className="ai-orb"><Sparkles size={15} /></div>
                   <div>
-                    <span className="agent-label"><i />Canvasly Agent</span>
-                    <strong>画布上下文已同步</strong>
+                    <span className="agent-label"><i />Canvasly {collaborationMode === "cowork" ? "Cowork" : "Chat"}</span>
+                    <strong>
+                      {collaborationMode === "cowork"
+                        ? "画布上下文已同步"
+                        : "对话模式 · 不修改画布"}
+                    </strong>
                   </div>
                 </div>
 
@@ -2470,7 +2577,7 @@ export default function Home() {
                       <div className="message-bubble">
                         <p>{message.text}</p>
                         {message.detail && <span>{message.detail}</span>}
-                        {message.role === "assistant" && message.id !== "welcome" && !message.error && (
+                        {collaborationMode === "cowork" && message.role === "assistant" && !message.id.endsWith("welcome") && !message.error && (
                           <button onClick={undo} disabled={!canUndo} type="button"><Undo2 size={12} />撤销这次修改</button>
                         )}
                       </div>
@@ -2479,7 +2586,7 @@ export default function Home() {
                   {isWorking && (
                     <article className="message assistant working">
                       <span className="message-avatar"><Wand2 size={14} /></span>
-                      <div className="message-bubble"><p><Loader2 className="spin" size={14} />正在理解页面并生成修改…</p></div>
+                      <div className="message-bubble"><p><Loader2 className="spin" size={14} />{collaborationMode === "cowork" ? "正在理解页面并生成修改…" : "正在思考并组织回复…"}</p></div>
                     </article>
                   )}
                   <div ref={chatEndRef} />
@@ -2489,7 +2596,7 @@ export default function Home() {
                   <div className="suggestions">
                     <span>试试这样说</span>
                     <div>
-                      {PROMPT_SUGGESTIONS.map((suggestion) => (
+                      {(collaborationMode === "cowork" ? PROMPT_SUGGESTIONS : CHAT_SUGGESTIONS).map((suggestion) => (
                         <button key={suggestion} onClick={() => { setPrompt(suggestion); promptRef.current?.focus(); }} type="button">{suggestion}</button>
                       ))}
                     </div>
@@ -2525,7 +2632,15 @@ export default function Home() {
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
                     onKeyDown={handlePromptKeydown}
-                    placeholder={selection ? "描述你希望如何修改这里…" : "描述你想要的页面修改…"}
+                    placeholder={
+                      collaborationMode === "chat"
+                        ? selection
+                          ? "聊聊当前选择，或询问设计建议…"
+                          : "讨论页面、内容、方向或实现取舍…"
+                        : selection
+                          ? "描述你希望如何修改这里…"
+                          : "描述你想要的页面修改…"
+                    }
                     rows={3}
                     disabled={isWorking}
                   />
@@ -2534,7 +2649,7 @@ export default function Home() {
                       <button onClick={() => fileInputRef.current?.click()} aria-label="添加文档" title="添加文本、Markdown、HTML 或 CSS" type="button"><Paperclip size={17} /></button>
                       <button onClick={() => imageInputRef.current?.click()} aria-label="添加参考图" title="添加参考图" type="button"><ImageIcon size={17} /></button>
                     </div>
-                    <button className="send-button" onClick={() => void sendPrompt()} disabled={isWorking || hasStagedMoves || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
+                    <button className="send-button" onClick={() => void sendPrompt()} disabled={isWorking || (collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
                       {isWorking ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
                     </button>
                   </div>
@@ -2544,7 +2659,7 @@ export default function Home() {
                     <span className="provider-mini" style={{ background: provider.color }} />
                     {provider.name}<ChevronDown size={12} />
                   </button>
-                  <span>上下文 · {selection ? "当前目标" : "完整页面"}</span>
+                  <span>{collaborationMode === "cowork" ? "Cowork" : "Chat"} · {selection ? "当前目标" : "完整页面"}</span>
                 </div>
               </div>
             </>
