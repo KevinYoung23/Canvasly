@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible Canvasly problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. Open…\n2. Select…\n3. Send…"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Cowork / model editing
+        - Chat
+        - Canvas selection or drawing
+        - Free movement
+        - Steer / Queue
+        - HTML source editor
+        - Model connection
+        - Responsive layout
+        - Installation or deployment
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "macOS 15, Edge 140, Node 22, Docker…"
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Logs or screenshots
+      description: Remove API keys and personal information before posting.

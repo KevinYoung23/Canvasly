@@ -89,7 +89,7 @@ export const PROVIDERS: ProviderPreset[] = [
     description: "连接本机已登录的 Copilot 服务；无需在 Canvasly 中填写 API 密钥。",
     protocol: "openai-responses",
     baseUrl: "http://host.docker.internal:4141/v1",
-    model: "gpt-5.5",
+    model: "auto",
     keyPlaceholder: "通常留空",
     color: "#24292f",
   },

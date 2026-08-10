@@ -42,12 +42,32 @@ function messageText(content) {
   return content
     .map((part) => {
       if (!part || typeof part !== "object") return "";
-      if (part.type === "text" && typeof part.text === "string") return part.text;
-      if (part.type === "image_url") return "[An image reference was supplied to the editor.]";
+      if (
+        ["text", "input_text", "output_text"].includes(part.type) &&
+        typeof part.text === "string"
+      ) {
+        return part.text;
+      }
+      if (part.type === "image_url" || part.type === "input_image") {
+        return "[An image reference was supplied to the editor.]";
+      }
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function responseInputMessages(input) {
+  if (typeof input === "string") {
+    return [{ role: "user", content: input }];
+  }
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((item) => item && typeof item === "object" && "role" in item)
+    .map((item) => ({
+      role: item.role === "developer" ? "system" : item.role,
+      content: item.content,
+    }));
 }
 
 function splitMessages(messages) {
@@ -92,7 +112,9 @@ const server = createServer(async (request, response) => {
     }
   }
 
-  if (request.method !== "POST" || !url.pathname.endsWith("/chat/completions")) {
+  const usesResponses = url.pathname.endsWith("/responses");
+  const usesChatCompletions = url.pathname.endsWith("/chat/completions");
+  if (request.method !== "POST" || (!usesResponses && !usesChatCompletions)) {
     return writeJson(response, 404, { error: { message: "Not found" } });
   }
 
@@ -108,7 +130,10 @@ const server = createServer(async (request, response) => {
   let session;
   try {
     const payload = await readJson(request);
-    const { system, conversation } = splitMessages(payload.messages);
+    const messages = usesResponses
+      ? responseInputMessages(payload.input)
+      : payload.messages;
+    const { system, conversation } = splitMessages(messages);
     if (!conversation.trim()) {
       return writeJson(response, 400, { error: { message: "No user message supplied" } });
     }
@@ -129,11 +154,33 @@ const server = createServer(async (request, response) => {
       throw new Error("Copilot returned no content");
     }
 
+    const id = `canvasly-copilot-${Date.now()}`;
+    const model = typeof payload.model === "string" ? payload.model : "auto";
+    if (usesResponses) {
+      return writeJson(response, 200, {
+        id,
+        object: "response",
+        created_at: Math.floor(Date.now() / 1000),
+        status: "completed",
+        model,
+        output_text: content,
+        output: [
+          {
+            id: `${id}-message`,
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: content, annotations: [] }],
+          },
+        ],
+      });
+    }
+
     return writeJson(response, 200, {
-      id: `canvasly-copilot-${Date.now()}`,
+      id,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: typeof payload.model === "string" ? payload.model : "auto",
+      model,
       choices: [
         {
           index: 0,

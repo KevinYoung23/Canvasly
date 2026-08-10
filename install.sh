@@ -18,6 +18,23 @@ if [[ ! -f .env ]]; then
 fi
 
 if [[ "${1:-}" == "--copilot" ]]; then
+  copilot_token="${COPILOT_GITHUB_TOKEN:-}"
+  if [[ -z "${copilot_token}" ]]; then
+    copilot_token="$(sed -n 's/^COPILOT_GITHUB_TOKEN=//p' .env | tail -1)"
+  fi
+  if [[ -z "${copilot_token}" ]]; then
+    echo "The containerized Copilot bridge requires COPILOT_GITHUB_TOKEN in .env."
+    echo "For desktop login instead, run 'copilot login' and 'npm run copilot:bridge' on the host."
+    exit 1
+  fi
+  private_endpoints="${ALLOW_PRIVATE_LLM_ENDPOINTS:-}"
+  if [[ -z "${private_endpoints}" ]]; then
+    private_endpoints="$(sed -n 's/^ALLOW_PRIVATE_LLM_ENDPOINTS=//p' .env | tail -1)"
+  fi
+  if [[ "${private_endpoints}" != "true" ]]; then
+    echo "The Copilot profile requires ALLOW_PRIVATE_LLM_ENDPOINTS=true in .env."
+    exit 1
+  fi
   docker compose --profile copilot up --build -d
 else
   docker compose up --build -d

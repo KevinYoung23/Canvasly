@@ -94,6 +94,7 @@ function isPrivateHostname(hostname: string) {
   if (
     host === "localhost" ||
     host === "::1" ||
+    host === "::" ||
     host === "0.0.0.0" ||
     host === "host.docker.internal" ||
     host.endsWith(".localhost") ||
@@ -110,7 +111,18 @@ function isPrivateHostname(hostname: string) {
     const second = Number(private172[1]);
     if (second >= 16 && second <= 31) return true;
   }
-  if (/^169\.254\./.test(host) || /^fc[0-9a-f]{2}:/i.test(host) || /^fe80:/i.test(host)) {
+  const carrierGradeNat = host.match(/^100\.(\d{1,3})\./);
+  if (carrierGradeNat) {
+    const second = Number(carrierGradeNat[1]);
+    if (second >= 64 && second <= 127) return true;
+  }
+  if (
+    /^169\.254\./.test(host) ||
+    /^::ffff:/i.test(host) ||
+    /^f[cd][0-9a-f]{2}:/i.test(host) ||
+    /^fe[89ab][0-9a-f]:/i.test(host) ||
+    /^fe[c-f][0-9a-f]:/i.test(host)
+  ) {
     return true;
   }
   return false;
