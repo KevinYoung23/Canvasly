@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Monitor,
   MousePointer2,
+  Move,
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
@@ -52,7 +53,7 @@ import {
   type ProviderProtocol,
 } from "./editor-data";
 
-type ToolMode = "select" | "region" | "draw";
+type ToolMode = "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
 type PanelTab = "chat" | "code";
 
@@ -142,8 +143,8 @@ const INITIAL_MESSAGES: ChatMessage[] = [
   {
     id: "welcome",
     role: "assistant",
-    text: "想改哪里？选中元素、圈出区域，或直接在画布上画一笔，然后告诉我你的想法。",
-    detail: "当前为演示模型，你可以先体验完整编辑流程。",
+    text: "画布已经就绪。下一步想让它变成什么样？",
+    detail: "当前模型 · Canvasly Demo",
   },
 ];
 
@@ -539,6 +540,97 @@ function getElementPlacement(doc: Document, element: Element): SelectionPlacemen
     "vertical",
     { x: rect.left + rect.width / 2, y: rect.bottom },
   );
+}
+
+function getPlacementIndicatorRect(
+  doc: Document,
+  placement: SelectionPlacement,
+): Rect | null {
+  let parent: Element | null = null;
+  let previous: Element | null = null;
+  let next: Element | null = null;
+  try {
+    parent = doc.querySelector(placement.parentSelector);
+    previous = placement.previousSelector
+      ? doc.querySelector(placement.previousSelector)
+      : null;
+    next = placement.nextSelector ? doc.querySelector(placement.nextSelector) : null;
+  } catch {
+    return null;
+  }
+  if (!parent) return null;
+
+  const parentRect = parent.getBoundingClientRect();
+  const previousRect = previous?.getBoundingClientRect();
+  const nextRect = next?.getBoundingClientRect();
+  if (placement.axis === "horizontal") {
+    const x = nextRect?.left ?? previousRect?.right ?? parentRect.left;
+    return {
+      x: x - 2,
+      y: parentRect.top,
+      width: 4,
+      height: Math.max(24, parentRect.height),
+    };
+  }
+
+  const y = nextRect?.top ?? previousRect?.bottom ?? parentRect.top;
+  return {
+    x: parentRect.left,
+    y: y - 2,
+    width: Math.max(24, parentRect.width),
+    height: 4,
+  };
+}
+
+function moveElementInHtml(
+  source: string,
+  sourceSelector: string,
+  placement: SelectionPlacement,
+) {
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  let element: Element | null = null;
+  let parent: Element | null = null;
+  let previous: Element | null = null;
+  let next: Element | null = null;
+  try {
+    element = doc.querySelector(sourceSelector);
+    parent = doc.querySelector(placement.parentSelector);
+    previous = placement.previousSelector
+      ? doc.querySelector(placement.previousSelector)
+      : null;
+    next = placement.nextSelector ? doc.querySelector(placement.nextSelector) : null;
+  } catch {
+    return null;
+  }
+  if (
+    !element ||
+    !parent ||
+    element === doc.documentElement ||
+    element === doc.body ||
+    element === parent ||
+    element.contains(parent)
+  ) {
+    return null;
+  }
+
+  const before = doc.documentElement.outerHTML;
+  if (next?.parentElement === parent) {
+    parent.insertBefore(element, next);
+  } else if (previous?.parentElement === parent) {
+    previous.after(element);
+  } else if (placement.relation === "prepend") {
+    parent.prepend(element);
+  } else {
+    parent.append(element);
+  }
+  const after = doc.documentElement.outerHTML;
+  if (after === before) return null;
+
+  const documentMatch = /<html\b[\s\S]*<\/html\s*>/i.exec(source);
+  if (!documentMatch || documentMatch.index === undefined) {
+    return serializeDocument(doc);
+  }
+  return `${source.slice(0, documentMatch.index)}${after}${source.slice(documentMatch.index + documentMatch[0].length)}`;
 }
 
 function toSvgPath(points: Point[]) {
@@ -1039,12 +1131,14 @@ function applyDemoEdit(
 
 function ToolButton({
   active,
+  disabled = false,
   label,
   shortcut,
   onClick,
   children,
 }: {
   active: boolean;
+  disabled?: boolean;
   label: string;
   shortcut: string;
   onClick: () => void;
@@ -1054,6 +1148,7 @@ function ToolButton({
     <button
       className={`tool-button ${active ? "active" : ""}`}
       onClick={onClick}
+      disabled={disabled}
       aria-label={`${label} (${shortcut})`}
       title={`${label} · ${shortcut}`}
       type="button"
@@ -1081,6 +1176,8 @@ export default function Home() {
   const [pendingProject, setPendingProject] = useState<ProjectReplacement | null>(null);
   const [selection, setSelection] = useState<SelectionContext | null>(null);
   const [hoverRect, setHoverRect] = useState<Rect | null>(null);
+  const [moveIndicator, setMoveIndicator] = useState<Rect | null>(null);
+  const [isMovingElement, setIsMovingElement] = useState(false);
   const [regionRect, setRegionRect] = useState<Rect | null>(null);
   const [drawPoints, setDrawPoints] = useState<Point[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
@@ -1099,6 +1196,7 @@ export default function Home() {
   const [draftConfig, setDraftConfig] = useState<ModelConfig>(modelConfig);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const iframeCleanupRef = useRef<() => void>(() => undefined);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -1108,6 +1206,10 @@ export default function Home() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const pointerOriginRef = useRef<Point | null>(null);
   const pointerActiveRef = useRef(false);
+  const selectionRef = useRef<SelectionContext | null>(null);
+  const moveSourceSelectorRef = useRef<string | null>(null);
+  const movePlacementRef = useRef<SelectionPlacement | null>(null);
+  const documentRevisionRef = useRef(0);
 
   const currentHtml = history[historyIndex];
   const previewHtml = useMemo(() => safePreviewHtml(currentHtml), [currentHtml]);
@@ -1117,6 +1219,7 @@ export default function Home() {
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
   const hasUnsavedChanges = currentHtml !== savedHtml || codeDraft !== currentHtml;
+  const hasPendingCodeDraft = codeDraft !== currentHtml;
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -1126,6 +1229,7 @@ export default function Home() {
   const commitHtml = useCallback(
     (nextHtml: string) => {
       if (!nextHtml.trim() || nextHtml === currentHtml) return;
+      documentRevisionRef.current += 1;
       const nextHistory = history.slice(0, historyIndex + 1);
       nextHistory.push(nextHtml);
       setHistory(nextHistory.slice(-30));
@@ -1140,6 +1244,7 @@ export default function Home() {
 
   const undo = useCallback(() => {
     if (!canUndo) return;
+    documentRevisionRef.current += 1;
     const nextIndex = historyIndex - 1;
     setHistoryIndex(nextIndex);
     setCodeDraft(history[nextIndex]);
@@ -1148,47 +1253,200 @@ export default function Home() {
 
   const redo = useCallback(() => {
     if (!canRedo) return;
+    documentRevisionRef.current += 1;
     const nextIndex = historyIndex + 1;
     setHistoryIndex(nextIndex);
     setCodeDraft(history[nextIndex]);
     setSelection(null);
   }, [canRedo, history, historyIndex]);
 
+  const resetIframeInteractionStyles = useCallback((mode: ToolMode) => {
+    const body = iframeRef.current?.contentDocument?.body;
+    if (!body) return;
+    body.style.userSelect = "";
+    body.style.touchAction = mode === "move" && !isWorking ? "none" : "";
+    body.style.cursor = isWorking
+      ? "wait"
+      : mode === "select"
+        ? "default"
+        : mode === "move"
+          ? "grab"
+          : "crosshair";
+  }, [isWorking]);
+
   const clearSelection = useCallback(() => {
     setSelection(null);
     setRegionRect(null);
     setDrawPoints([]);
     setHoverRect(null);
-  }, []);
+    setMoveIndicator(null);
+    setIsMovingElement(false);
+    moveSourceSelectorRef.current = null;
+    movePlacementRef.current = null;
+    resetIframeInteractionStyles(toolMode);
+  }, [resetIframeInteractionStyles, toolMode]);
+
+  const activateTool = useCallback((mode: ToolMode) => {
+    if (mode === "move" && hasPendingCodeDraft) {
+      setPanelOpen(true);
+      setPanelTab("code");
+      showToast("请先应用或放弃 HTML 草稿，再移动组件");
+      return;
+    }
+    moveSourceSelectorRef.current = null;
+    movePlacementRef.current = null;
+    setMoveIndicator(null);
+    setIsMovingElement(false);
+    setHoverRect(null);
+    setToolMode(mode);
+    resetIframeInteractionStyles(mode);
+  }, [hasPendingCodeDraft, resetIframeInteractionStyles, showToast]);
+
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
 
   const wireIframe = useCallback(() => {
     const iframe = iframeRef.current;
     const doc = iframe?.contentDocument;
     if (!iframe || !doc) return () => undefined;
 
-    doc.body.style.cursor = toolMode === "select" ? "default" : "crosshair";
+    resetIframeInteractionStyles(toolMode);
     const ElementCtor = doc.defaultView?.Element;
 
-    const updateRect = (element: Element) => {
-      const rect = element.getBoundingClientRect();
+    const toFrameRect = (rect: Rect) => {
       const iframeRect = iframe.getBoundingClientRect();
       const frameRect = iframe.parentElement?.getBoundingClientRect() ?? iframeRect;
       return {
-        x: rect.left + iframeRect.left - frameRect.left,
-        y: rect.top + iframeRect.top - frameRect.top,
+        x: rect.x + iframeRect.left - frameRect.left,
+        y: rect.y + iframeRect.top - frameRect.top,
         width: rect.width,
         height: rect.height,
       };
     };
 
-    const handleMove = (event: Event) => {
-      if (toolMode !== "select" || !ElementCtor || !(event.target instanceof ElementCtor)) {
-        return;
-      }
-      setHoverRect(updateRect(event.target));
+    const updateRect = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      return toFrameRect({
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      });
     };
 
-    const handleLeave = () => setHoverRect(null);
+    const handleMove = (event: Event) => {
+      if (!ElementCtor || !(event.target instanceof ElementCtor)) {
+        return;
+      }
+      if (toolMode === "select") {
+        setHoverRect(updateRect(event.target));
+        return;
+      }
+      if (toolMode !== "move" || isWorking) return;
+      if (!moveSourceSelectorRef.current) {
+        setHoverRect(updateRect(event.target));
+        return;
+      }
+
+      const pointerEvent = event as globalThis.PointerEvent;
+      const placement = getSelectionPlacement(doc, {
+        x: pointerEvent.clientX - 2,
+        y: pointerEvent.clientY - 2,
+        width: 4,
+        height: 4,
+      });
+      const source = doc.querySelector(moveSourceSelectorRef.current);
+      const parent = placement ? doc.querySelector(placement.parentSelector) : null;
+      if (!placement || !source || !parent || source === parent || source.contains(parent)) {
+        movePlacementRef.current = null;
+        setMoveIndicator(null);
+        return;
+      }
+
+      const indicator = getPlacementIndicatorRect(doc, placement);
+      movePlacementRef.current = placement;
+      setMoveIndicator(indicator ? toFrameRect(indicator) : null);
+    };
+
+    const handleLeave = () => {
+      if (!moveSourceSelectorRef.current) setHoverRect(null);
+    };
+
+    const handlePointerDown = (event: Event) => {
+      if (
+        toolMode !== "move" ||
+        isWorking ||
+        !ElementCtor ||
+        !(event.target instanceof ElementCtor)
+      ) {
+        return;
+      }
+      const pointerEvent = event as globalThis.PointerEvent;
+      const clicked = event.target;
+      const selected = selectionRef.current?.selector
+        ? doc.querySelector(selectionRef.current.selector)
+        : null;
+      const target = selected?.contains(clicked) ? selected : clicked;
+      if (["HTML", "BODY", "HEAD", "SCRIPT", "STYLE"].includes(target.tagName)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      target.setPointerCapture?.(pointerEvent.pointerId);
+      const selector = getUniqueSelector(target);
+      moveSourceSelectorRef.current = selector;
+      movePlacementRef.current = null;
+      setIsMovingElement(true);
+      setHoverRect(null);
+      setMoveIndicator(null);
+      setSelection({
+        type: "element",
+        label: `移动 · ${getElementLabel(target)}`,
+        selector,
+        html: target.outerHTML.slice(0, 2600),
+        placement: getElementPlacement(doc, target),
+        rect: updateRect(target),
+      });
+      doc.body.style.cursor = "grabbing";
+      doc.body.style.userSelect = "none";
+    };
+
+    const teardownMove = () => {
+      moveSourceSelectorRef.current = null;
+      movePlacementRef.current = null;
+      setIsMovingElement(false);
+      setMoveIndicator(null);
+      setHoverRect(null);
+      doc.body.style.cursor = "grab";
+      doc.body.style.userSelect = "";
+      doc.body.style.touchAction = "none";
+    };
+
+    const finishMove = (event: Event) => {
+      if (toolMode !== "move" || !moveSourceSelectorRef.current) return;
+      event.preventDefault();
+      const sourceSelector = moveSourceSelectorRef.current;
+      const placement = movePlacementRef.current;
+      teardownMove();
+
+      if (!placement) {
+        showToast("未找到可用的放置位置");
+        return;
+      }
+      const movedHtml = moveElementInHtml(currentHtml, sourceSelector, placement);
+      if (!movedHtml) {
+        showToast("组件位置没有变化");
+        return;
+      }
+      commitHtml(movedHtml);
+      showToast("组件已移动，可随时撤销");
+    };
+
+    const cancelMove = (event: Event) => {
+      if (toolMode !== "move" || !moveSourceSelectorRef.current) return;
+      event.preventDefault();
+      teardownMove();
+    };
 
     const handleClick = (event: Event) => {
       if (toolMode !== "select" || !ElementCtor || !(event.target instanceof ElementCtor)) {
@@ -1214,16 +1472,33 @@ export default function Home() {
     };
 
     doc.addEventListener("pointermove", handleMove, true);
+    doc.addEventListener("pointerdown", handlePointerDown, true);
+    doc.addEventListener("pointerup", finishMove, true);
+    doc.addEventListener("pointercancel", cancelMove, true);
     doc.addEventListener("pointerleave", handleLeave, true);
     doc.addEventListener("click", handleClick, true);
     return () => {
       doc.removeEventListener("pointermove", handleMove, true);
+      doc.removeEventListener("pointerdown", handlePointerDown, true);
+      doc.removeEventListener("pointerup", finishMove, true);
+      doc.removeEventListener("pointercancel", cancelMove, true);
       doc.removeEventListener("pointerleave", handleLeave, true);
       doc.removeEventListener("click", handleClick, true);
+      doc.body.style.userSelect = "";
+      doc.body.style.touchAction = "";
     };
-  }, [toolMode]);
+  }, [commitHtml, currentHtml, isWorking, resetIframeInteractionStyles, showToast, toolMode]);
 
-  useEffect(() => wireIframe(), [previewHtml, wireIframe]);
+  const refreshIframeWiring = useCallback(() => {
+    iframeCleanupRef.current();
+    iframeCleanupRef.current = wireIframe();
+  }, [wireIframe]);
+
+  useEffect(() => {
+    refreshIframeWiring();
+  }, [previewHtml, refreshIframeWiring]);
+
+  useEffect(() => () => iframeCleanupRef.current(), []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1274,9 +1549,10 @@ export default function Home() {
         return;
       }
       if (editingText) return;
-      if (event.key.toLowerCase() === "v") setToolMode("select");
-      if (event.key.toLowerCase() === "r") setToolMode("region");
-      if (event.key.toLowerCase() === "b") setToolMode("draw");
+      if (event.key.toLowerCase() === "v") activateTool("select");
+      if (event.key.toLowerCase() === "m") activateTool("move");
+      if (event.key.toLowerCase() === "r") activateTool("region");
+      if (event.key.toLowerCase() === "b") activateTool("draw");
       if (event.key === "/") {
         event.preventDefault();
         setPanelOpen(true);
@@ -1287,7 +1563,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", handleKeydown);
     return () => window.removeEventListener("keydown", handleKeydown);
-  }, [clearSelection, redo, undo]);
+  }, [activateTool, clearSelection, redo, undo]);
 
   const pointFromEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1295,7 +1571,7 @@ export default function Home() {
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (toolMode === "select") return;
+    if (toolMode === "select" || toolMode === "move") return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
     pointerActiveRef.current = true;
@@ -1312,7 +1588,7 @@ export default function Home() {
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!pointerActiveRef.current || toolMode === "select") return;
+    if (!pointerActiveRef.current || toolMode === "select" || toolMode === "move") return;
     const point = pointFromEvent(event);
     if (toolMode === "region" && pointerOriginRef.current) {
       const origin = pointerOriginRef.current;
@@ -1443,6 +1719,7 @@ export default function Home() {
     const instruction = prompt.trim();
     if ((!instruction && !attachments.length) || isWorking) return;
     const finalInstruction = instruction || "请参考附件优化当前页面。";
+    const requestRevision = documentRevisionRef.current;
     const selectedContext = selection;
     const sentAttachments = attachments;
     const prepared = prepareTransformHtml(currentHtml, selectedContext, finalInstruction);
@@ -1522,6 +1799,9 @@ export default function Home() {
         }
       }
 
+      if (documentRevisionRef.current !== requestRevision) {
+        throw new Error("生成期间画布已发生变化。已保留最新版本，本次 AI 结果未应用。");
+      }
       commitHtml(result.html);
       setMessages((items) => [
         ...items,
@@ -1605,6 +1885,7 @@ export default function Home() {
   };
 
   const applyProjectReplacement = (replacement: ProjectReplacement) => {
+    documentRevisionRef.current += 1;
     setHistory([replacement.html]);
     setHistoryIndex(0);
     setCodeDraft(replacement.html);
@@ -1675,6 +1956,7 @@ export default function Home() {
   };
 
   const resetProject = () => {
+    documentRevisionRef.current += 1;
     setHistory([projectBaseline]);
     setHistoryIndex(0);
     setCodeDraft(projectBaseline);
@@ -1691,6 +1973,7 @@ export default function Home() {
         <div className="brand-lockup">
           <span className="app-mark"><span /></span>
           <span className="app-name">Canvasly</span>
+          <span className="app-edition">Studio</span>
         </div>
 
         <div className="project-switcher-wrap" ref={projectMenuRef}>
@@ -1755,9 +2038,10 @@ export default function Home() {
       <div className={`workspace ${panelOpen ? "" : "panel-collapsed"}`}>
         <aside className="tool-rail" aria-label="画布工具">
           <div className="tool-group">
-            <ToolButton active={toolMode === "select"} label="选择元素" shortcut="V" onClick={() => setToolMode("select")}><MousePointer2 size={19} /></ToolButton>
-            <ToolButton active={toolMode === "region"} label="圈选区域" shortcut="R" onClick={() => setToolMode("region")}><BoxSelect size={19} /></ToolButton>
-            <ToolButton active={toolMode === "draw"} label="手绘标注" shortcut="B" onClick={() => setToolMode("draw")}><Pencil size={18} /></ToolButton>
+            <ToolButton active={toolMode === "select"} label="选择元素" shortcut="V" onClick={() => activateTool("select")}><MousePointer2 size={19} /></ToolButton>
+            <ToolButton active={toolMode === "move"} disabled={isWorking || hasPendingCodeDraft} label="移动组件" shortcut="M" onClick={() => activateTool("move")}><Move size={18} /></ToolButton>
+            <ToolButton active={toolMode === "region"} label="圈选区域" shortcut="R" onClick={() => activateTool("region")}><BoxSelect size={19} /></ToolButton>
+            <ToolButton active={toolMode === "draw"} label="手绘标注" shortcut="B" onClick={() => activateTool("draw")}><Pencil size={18} /></ToolButton>
           </div>
           <span className="rail-divider" />
           <div className="tool-group">
@@ -1771,16 +2055,43 @@ export default function Home() {
 
         <section className="canvas-column">
           <div className="canvas-toolbar">
-            <div className="device-tabs" aria-label="预览尺寸">
-              <button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")} aria-label="桌面预览" type="button"><Monitor size={16} /></button>
-              <button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="平板预览" type="button"><Tablet size={16} /></button>
-              <button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="手机预览" type="button"><Smartphone size={16} /></button>
+            <div className={`canvas-tool-state state-${toolMode}`}>
+              <span className="tool-state-icon">
+                {toolMode === "select" && <MousePointer2 size={14} />}
+                {toolMode === "move" && <Move size={14} />}
+                {toolMode === "region" && <BoxSelect size={14} />}
+                {toolMode === "draw" && <Pencil size={14} />}
+              </span>
+              <span>
+                <strong>
+                  {toolMode === "select" && "智能选择"}
+                  {toolMode === "move" && (isMovingElement ? "正在移动" : "移动组件")}
+                  {toolMode === "region" && "区域定位"}
+                  {toolMode === "draw" && "手绘意图"}
+                </strong>
+                <small>
+                  {toolMode === "select" && "DOM 目标"}
+                  {toolMode === "move" && (isMovingElement ? "寻找落点" : "直接重排")}
+                  {toolMode === "region" && "范围上下文"}
+                  {toolMode === "draw" && "视觉上下文"}
+                </small>
+              </span>
             </div>
-            <span className="canvas-size">{deviceSize.width} × {deviceSize.height}</span>
-            <div className="canvas-hint">
-              {toolMode === "select" && <><MousePointer2 size={13} />点击页面元素以编辑</>}
-              {toolMode === "region" && <><BoxSelect size={13} />拖动圈出需要修改的区域</>}
-              {toolMode === "draw" && <><Pencil size={13} />在页面上手绘标记</>}
+            <div className="canvas-viewport-controls">
+              <div className="device-tabs" aria-label="预览尺寸">
+                <button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")} aria-label="桌面预览" type="button"><Monitor size={16} /></button>
+                <button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="平板预览" type="button"><Tablet size={16} /></button>
+                <button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="手机预览" type="button"><Smartphone size={16} /></button>
+              </div>
+              <span className="canvas-size">{deviceSize.width} × {deviceSize.height}</span>
+            </div>
+            <div className="mobile-history-actions" aria-label="版本操作">
+              <button onClick={undo} disabled={!canUndo} aria-label="撤销" type="button"><Undo2 size={15} /></button>
+              <button onClick={redo} disabled={!canRedo} aria-label="重做" type="button"><Redo2 size={15} /></button>
+            </div>
+            <div className={`canvas-context-state ${selection ? "active" : ""}`}>
+              <Sparkles size={13} />
+              <span>{selection ? selection.label : "DOM 上下文已同步"}</span>
             </div>
           </div>
 
@@ -1799,7 +2110,7 @@ export default function Home() {
                 title="HTML 页面预览"
                 sandbox="allow-same-origin"
                 referrerPolicy="no-referrer"
-                onLoad={() => wireIframe()}
+                onLoad={refreshIframeWiring}
               />
               <div
                 className="interaction-layer"
@@ -1815,11 +2126,11 @@ export default function Home() {
                 )}
               </div>
 
-              {hoverRect && toolMode === "select" && !selection && (
+              {hoverRect && (toolMode === "select" || toolMode === "move") && !selection && (
                 <div className="hover-outline" style={{ left: hoverRect.x, top: hoverRect.y, width: hoverRect.width, height: hoverRect.height }} />
               )}
               {selection?.type === "element" && (
-                <div className="selection-outline" style={{ left: selection.rect.x, top: selection.rect.y, width: selection.rect.width, height: selection.rect.height }}>
+                <div className={`selection-outline ${isMovingElement ? "moving" : ""}`} style={{ left: selection.rect.x, top: selection.rect.y, width: selection.rect.width, height: selection.rect.height }}>
                   <span>{selection.label}</span>
                 </div>
               )}
@@ -1828,19 +2139,27 @@ export default function Home() {
                   {selection?.type === "region" && <span>编辑这个区域</span>}
                 </div>
               )}
+              {moveIndicator && toolMode === "move" && (
+                <div
+                  className="move-drop-indicator"
+                  style={{ left: moveIndicator.x, top: moveIndicator.y, width: moveIndicator.width, height: moveIndicator.height }}
+                >
+                  <span>放到这里</span>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="canvas-statusbar">
-            <span><span className="status-dot" />预览已隔离，页面脚本不会执行</span>
-            <span>{historyIndex + 1} / {history.length} 个版本</span>
+            <span><span className="status-dot" />{isWorking ? "Agent 正在生成" : "画布已同步"}</span>
+            <span className="status-meta"><strong>{device}</strong><span>{historyIndex + 1} / {history.length} 版本</span></span>
           </div>
         </section>
 
         <aside className={`ai-panel ${panelOpen ? "open" : ""}`}>
           <div className="panel-header">
             <div className="panel-tabs">
-              <button className={panelTab === "chat" ? "active" : ""} onClick={() => setPanelTab("chat")} type="button"><MessageSquare size={15} />AI 编辑</button>
+              <button className={panelTab === "chat" ? "active" : ""} onClick={() => setPanelTab("chat")} type="button"><MessageSquare size={15} />智能编辑</button>
               <button className={panelTab === "code" ? "active" : ""} onClick={() => setPanelTab("code")} type="button"><Code2 size={15} />HTML</button>
             </div>
             <button className="panel-close" onClick={() => setPanelOpen(false)} aria-label="关闭面板" type="button"><X size={17} /></button>
@@ -1851,7 +2170,10 @@ export default function Home() {
               <div className="chat-scroll">
                 <div className="context-banner">
                   <div className="ai-orb"><Sparkles size={15} /></div>
-                  <div><strong>从想法到页面</strong><span>聊天、圈选、手绘和参考图都在同一条编辑流里。</span></div>
+                  <div>
+                    <span className="agent-label"><i />Canvasly Agent</span>
+                    <strong>画布上下文已同步</strong>
+                  </div>
                 </div>
 
                 <div className="message-list">
@@ -1935,7 +2257,7 @@ export default function Home() {
                     <span className="provider-mini" style={{ background: provider.color }} />
                     {provider.name}<ChevronDown size={12} />
                   </button>
-                  <span>Enter 发送 · Shift Enter 换行</span>
+                  <span>上下文 · {selection ? "当前目标" : "完整页面"}</span>
                 </div>
               </div>
             </>
@@ -1947,7 +2269,11 @@ export default function Home() {
               </div>
               <textarea
                 value={codeDraft}
-                onChange={(event) => setCodeDraft(event.target.value)}
+                onChange={(event) => {
+                  documentRevisionRef.current += 1;
+                  activateTool("select");
+                  setCodeDraft(event.target.value);
+                }}
                 spellCheck={false}
                 aria-label="HTML 源码"
               />
