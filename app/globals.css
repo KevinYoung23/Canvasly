@@ -610,14 +610,42 @@ textarea:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-.canvas-size em {
-  padding: 2px 4px;
+.canvas-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid #dbe2de;
+  border-radius: 6px;
+  background: #f8faf9;
+}
+
+.canvas-zoom-controls button {
+  min-width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 4px;
+  border: 0;
   border-radius: 4px;
-  background: #e8eeeb;
-  color: #53615a;
+  background: transparent;
+  color: #67736d;
   font-size: 8px;
-  font-style: normal;
   font-weight: 700;
+  cursor: pointer;
+}
+
+.canvas-zoom-controls button:hover:not(:disabled),
+.canvas-zoom-controls button.fit {
+  background: #e8eeeb;
+  color: #35423c;
+}
+
+.canvas-zoom-controls button:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .canvas-context-state {
@@ -656,7 +684,7 @@ textarea:focus-visible {
   overflow: auto;
   display: flex;
   align-items: flex-start;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 28px 30px 46px;
   background-color: var(--canvas);
   background-image:
@@ -665,12 +693,19 @@ textarea:focus-visible {
   background-size: 24px 24px;
   scrollbar-color: #b9c2bd transparent;
   scrollbar-width: thin;
+  scrollbar-gutter: stable both-edges;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
 }
 
 .device-stage {
   position: relative;
   flex: 0 0 auto;
-  transition: width 200ms ease, height 200ms ease;
+  margin-inline: auto;
+}
+
+.device-stage.user-zoomed {
+  margin: var(--canvas-pan-y, 0px) var(--canvas-pan-x, 0px);
 }
 
 .device-frame {
@@ -685,7 +720,6 @@ textarea:focus-visible {
     0 1px 1px rgba(24, 35, 29, 0.05),
     0 22px 55px rgba(26, 39, 32, 0.13);
   transform-origin: top left;
-  transition: width 240ms ease, height 240ms ease, transform 200ms ease;
 }
 
 .device-frame iframe {
@@ -1281,6 +1315,80 @@ textarea:focus-visible {
   box-shadow: 0 -12px 32px rgba(26, 39, 32, 0.045);
 }
 
+.agent-followups {
+  display: grid;
+  gap: 4px;
+  max-height: 126px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.active-agent-job,
+.queued-agent-job {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 7px;
+  border: 1px solid #dfe6e2;
+  border-radius: 8px;
+  background: #f5f8f6;
+  color: #5e6b64;
+}
+
+.active-agent-job {
+  border-color: #cce6dc;
+  background: #eff9f5;
+  color: var(--signal);
+}
+
+.queued-agent-job.steer {
+  border-color: #ddd7f3;
+  background: #f4f2fc;
+  color: var(--accent-dark);
+}
+
+.active-agent-job > span,
+.queued-agent-job > span {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 1px;
+}
+
+.active-agent-job strong,
+.queued-agent-job strong {
+  font-size: 8px;
+  font-weight: 760;
+}
+
+.active-agent-job small,
+.queued-agent-job small {
+  overflow: hidden;
+  color: #7f8b85;
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued-agent-job button {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.queued-agent-job button:hover {
+  background: rgba(56, 65, 61, 0.08);
+}
+
 .selection-chip {
   width: fit-content;
   max-width: 100%;
@@ -1414,6 +1522,10 @@ textarea:focus-visible {
   gap: 2px;
 }
 
+.composer-actions .followup-actions {
+  gap: 4px;
+}
+
 .composer-actions button {
   width: 27px;
   height: 27px;
@@ -1444,6 +1556,40 @@ textarea:focus-visible {
 }
 
 .composer-actions .send-button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.composer-actions .queue-button,
+.composer-actions .steer-button {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  font-size: 8px;
+  font-weight: 720;
+}
+
+.composer-actions .queue-button {
+  border: 1px solid #dce3df;
+  background: #f4f7f5;
+  color: #5f6c65;
+}
+
+.composer-actions .steer-button {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 4px 10px rgba(82, 68, 181, 0.18);
+}
+
+.composer-actions .steer-button:hover:not(:disabled) {
+  background: var(--accent-dark);
+  color: white;
+}
+
+.composer-actions .queue-button:disabled,
+.composer-actions .steer-button:disabled {
   opacity: 0.38;
   cursor: default;
 }
@@ -2167,8 +2313,13 @@ textarea:focus-visible {
     padding: 0 10px;
   }
   .canvas-context-state,
-  .canvas-size,
   .canvas-tool-state small { display: none; }
+  .canvas-size {
+    font-size: 0;
+  }
+  .canvas-zoom-controls {
+    font-size: 8px;
+  }
   .canvas-tool-state { gap: 7px; }
   .tool-state-icon { width: 28px; height: 28px; }
   .mobile-history-actions {

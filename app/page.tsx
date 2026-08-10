@@ -14,7 +14,9 @@ import {
   Image as ImageIcon,
   ImagePlus,
   Loader2,
+  Maximize2,
   MessageSquare,
+  Minus,
   Monitor,
   MousePointer2,
   Move,
@@ -22,6 +24,7 @@ import {
   PanelRightOpen,
   Paperclip,
   Pencil,
+  Plus,
   Redo2,
   RotateCcw,
   Send,
@@ -33,10 +36,13 @@ import {
   Undo2,
   Wand2,
   X,
+  ListPlus,
+  Route,
 } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -147,6 +153,21 @@ type ChatMessage = {
   text: string;
   detail?: string;
   error?: boolean;
+  jobId?: string;
+  queueState?: "steer" | "queued" | "running";
+};
+
+type AgentJobPriority = "normal" | "steer" | "queued";
+
+type AgentJob = {
+  id: string;
+  messageId: string;
+  mode: CollaborationMode;
+  instruction: string;
+  attachments: Attachment[];
+  selection: SelectionContext | null;
+  priority: AgentJobPriority;
+  config: ModelConfig;
 };
 
 type ModelConfig = {
@@ -169,6 +190,14 @@ const DEVICE_SIZES: Record<DeviceMode, { width: number; height: number }> = {
   tablet: { width: 768, height: 720 },
   mobile: { width: 390, height: 720 },
 };
+
+const MIN_CANVAS_SCALE = 0.15;
+const MAX_CANVAS_SCALE = 2.5;
+const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.0015;
+
+function clampCanvasScale(scale: number) {
+  return Math.min(MAX_CANVAS_SCALE, Math.max(MIN_CANVAS_SCALE, scale));
+}
 
 const INITIAL_COWORK_MESSAGES: ChatMessage[] = [
   {
@@ -1165,7 +1194,8 @@ export default function Home() {
   const [collaborationMode, setCollaborationMode] =
     useState<CollaborationMode>("cowork");
   const [panelOpen, setPanelOpen] = useState(true);
-  const [canvasScale, setCanvasScale] = useState(1);
+  const [canvasFitScale, setCanvasFitScale] = useState(1);
+  const [canvasZoom, setCanvasZoom] = useState(1);
   const [history, setHistory] = useState<string[]>([STARTER_HTML]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [codeDraft, setCodeDraft] = useState(STARTER_HTML);
@@ -1190,6 +1220,8 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isWorking, setIsWorking] = useState(false);
+  const [activeAgentJob, setActiveAgentJob] = useState<AgentJob | null>(null);
+  const [agentQueue, setAgentQueue] = useState<AgentJob[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
@@ -1204,6 +1236,13 @@ export default function Home() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeCleanupRef = useRef<() => void>(() => undefined);
   const canvasScrollerRef = useRef<HTMLDivElement>(null);
+  const canvasZoomAnchorRef = useRef<{
+    clientX: number;
+    clientY: number;
+    canvasX: number;
+    canvasY: number;
+    targetScale: number;
+  } | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -1217,21 +1256,54 @@ export default function Home() {
   const freeMoveDragRef = useRef<FreeMoveDrag | null>(null);
   const stagedMovesRef = useRef<Map<string, PendingFreeMove>>(new Map());
   const documentRevisionRef = useRef(0);
+  const hasAgentWorkRef = useRef(false);
+  const promptHistoryRef = useRef<Record<CollaborationMode, string[]>>({
+    cowork: [],
+    chat: [],
+  });
+  const promptHistoryIndexRef = useRef<number | null>(null);
+  const promptHistoryDraftRef = useRef("");
 
   const currentHtml = history[historyIndex];
   const previewHtml = useMemo(() => safePreviewHtml(currentHtml), [currentHtml]);
   const provider =
     PROVIDERS.find((item) => item.id === modelConfig.providerId) ?? PROVIDERS[0];
   const deviceSize = DEVICE_SIZES[device];
+  const canvasScale = clampCanvasScale(canvasFitScale * canvasZoom);
   const canvasScalePercent = Math.round(canvasScale * 100);
+  const canvasIsFit = Math.abs(canvasZoom - 1) < 0.01;
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
   const hasPendingCodeDraft = codeDraft !== currentHtml;
   const hasStagedMoves = stagedMoves.length > 0;
+  const hasAgentWork =
+    isWorking || activeAgentJob !== null || agentQueue.length > 0;
   const messages =
     collaborationMode === "cowork" ? coworkMessages : chatMessages;
-  const setMessages =
-    collaborationMode === "cowork" ? setCoworkMessages : setChatMessages;
+
+  const appendModeMessage = useCallback(
+    (mode: CollaborationMode, message: ChatMessage) => {
+      const setter = mode === "cowork" ? setCoworkMessages : setChatMessages;
+      setter((items) => [...items, message]);
+    },
+    [],
+  );
+
+  const updateModeMessage = useCallback(
+    (
+      mode: CollaborationMode,
+      messageId: string,
+      update: Partial<ChatMessage>,
+    ) => {
+      const setter = mode === "cowork" ? setCoworkMessages : setChatMessages;
+      setter((items) =>
+        items.map((item) =>
+          item.id === messageId ? { ...item, ...update } : item,
+        ),
+      );
+    },
+    [],
+  );
   const hasUnsavedChanges =
     currentHtml !== savedHtml || hasPendingCodeDraft || hasStagedMoves;
 
@@ -1435,6 +1507,10 @@ export default function Home() {
   }, [selection]);
 
   useEffect(() => {
+    hasAgentWorkRef.current = hasAgentWork;
+  }, [hasAgentWork]);
+
+  useEffect(() => {
     stagedMovesRef.current = new Map(
       stagedMoves.map((move) => [move.selector, move]),
     );
@@ -1447,6 +1523,14 @@ export default function Home() {
     let animationFrame = 0;
     const updateScale = () => {
       const style = window.getComputedStyle(scroller);
+      scroller.style.setProperty(
+        "--canvas-pan-x",
+        `${Math.round(scroller.clientWidth / 2)}px`,
+      );
+      scroller.style.setProperty(
+        "--canvas-pan-y",
+        `${Math.round(scroller.clientHeight / 2)}px`,
+      );
       const horizontalPadding =
         Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
       const verticalPadding =
@@ -1461,8 +1545,10 @@ export default function Home() {
           availableHeight / deviceSize.height,
         ),
       );
-      setCanvasScale((current) =>
-        Math.abs(current - nextScale) < 0.002 ? current : Number(nextScale.toFixed(3)),
+      setCanvasFitScale((current) =>
+        Math.abs(current - nextScale) < 0.0005
+          ? current
+          : Number(nextScale.toFixed(5)),
       );
     };
     const scheduleScaleUpdate = () => {
@@ -1479,6 +1565,101 @@ export default function Home() {
       window.cancelAnimationFrame(animationFrame);
     };
   }, [deviceSize.height, deviceSize.width, panelOpen]);
+
+  const setCanvasScaleAroundPoint = useCallback(
+    (
+      nextScale: number,
+      clientPoint?: { x: number; y: number },
+    ) => {
+      const scroller = canvasScrollerRef.current;
+      const stage = scroller?.querySelector<HTMLElement>(".device-stage");
+      const previousScale = canvasScale;
+      const clampedScale = clampCanvasScale(nextScale);
+      if (
+        !scroller ||
+        !stage ||
+        Math.abs(clampedScale - previousScale) < 0.001
+      ) {
+        return;
+      }
+
+      const point = clientPoint ?? {
+        x: scroller.getBoundingClientRect().left + scroller.clientWidth / 2,
+        y: scroller.getBoundingClientRect().top + scroller.clientHeight / 2,
+      };
+      const previousStageRect = stage.getBoundingClientRect();
+      const canvasPoint = {
+        x: (point.x - previousStageRect.left) / previousScale,
+        y: (point.y - previousStageRect.top) / previousScale,
+      };
+      canvasZoomAnchorRef.current = {
+        clientX: point.x,
+        clientY: point.y,
+        canvasX: canvasPoint.x,
+        canvasY: canvasPoint.y,
+        targetScale: clampedScale,
+      };
+      setCanvasZoom(clampedScale / canvasFitScale);
+    },
+    [canvasFitScale, canvasScale],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = canvasZoomAnchorRef.current;
+    const scroller = canvasScrollerRef.current;
+    const stage = scroller?.querySelector<HTMLElement>(".device-stage");
+    if (
+      !anchor ||
+      !scroller ||
+      !stage ||
+      Math.abs(anchor.targetScale - canvasScale) >= 0.001
+    ) {
+      return;
+    }
+    const stageRect = stage.getBoundingClientRect();
+    scroller.scrollLeft +=
+      stageRect.left + anchor.canvasX * canvasScale - anchor.clientX;
+    scroller.scrollTop +=
+      stageRect.top + anchor.canvasY * canvasScale - anchor.clientY;
+    canvasZoomAnchorRef.current = null;
+  }, [canvasScale]);
+
+  useEffect(() => {
+    const scroller = canvasScrollerRef.current;
+    if (!scroller) return;
+    const handleCanvasWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const iframeRect = iframeRef.current?.getBoundingClientRect();
+      const iframeOwnsGesture =
+        toolMode !== "region" &&
+        toolMode !== "draw" &&
+        iframeRect &&
+        event.clientX >= iframeRect.left &&
+        event.clientX <= iframeRect.right &&
+        event.clientY >= iframeRect.top &&
+        event.clientY <= iframeRect.bottom;
+      if (iframeOwnsGesture) return;
+      const factor = Math.exp(
+        -event.deltaY * CANVAS_WHEEL_ZOOM_SENSITIVITY,
+      );
+      setCanvasScaleAroundPoint(canvasScale * factor, {
+        x: event.clientX,
+        y: event.clientY,
+      });
+    };
+    scroller.addEventListener("wheel", handleCanvasWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", handleCanvasWheel);
+  }, [canvasScale, setCanvasScaleAroundPoint, toolMode]);
+
+  const resetCanvasZoom = useCallback(() => {
+    setCanvasScaleAroundPoint(canvasFitScale);
+  }, [canvasFitScale, setCanvasScaleAroundPoint]);
+
+  const changeDevice = (mode: DeviceMode) => {
+    setCanvasZoom(1);
+    setDevice(mode);
+  };
 
   const wireIframe = useCallback(() => {
     const iframe = iframeRef.current;
@@ -1542,6 +1723,19 @@ export default function Home() {
 
     const handleLeave = () => {
       if (!freeMoveDragRef.current) setHoverRect(null);
+    };
+
+    const handleIframeWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const iframeRect = iframe.getBoundingClientRect();
+      const factor = Math.exp(
+        -event.deltaY * CANVAS_WHEEL_ZOOM_SENSITIVITY,
+      );
+      setCanvasScaleAroundPoint(canvasScale * factor, {
+        x: iframeRect.left + event.clientX * canvasScale,
+        y: iframeRect.top + event.clientY * canvasScale,
+      });
     };
 
     const handlePointerDown = (event: Event) => {
@@ -1710,6 +1904,10 @@ export default function Home() {
     doc.addEventListener("pointerup", finishMove, true);
     doc.addEventListener("pointercancel", cancelMove, true);
     doc.addEventListener("pointerleave", handleLeave, true);
+    doc.addEventListener("wheel", handleIframeWheel, {
+      capture: true,
+      passive: false,
+    });
     doc.addEventListener("click", handleClick, true);
     return () => {
       doc.removeEventListener("pointermove", handleMove, true);
@@ -1717,11 +1915,12 @@ export default function Home() {
       doc.removeEventListener("pointerup", finishMove, true);
       doc.removeEventListener("pointercancel", cancelMove, true);
       doc.removeEventListener("pointerleave", handleLeave, true);
+      doc.removeEventListener("wheel", handleIframeWheel, true);
       doc.removeEventListener("click", handleClick, true);
       doc.body.style.userSelect = "";
       doc.body.style.touchAction = "";
     };
-  }, [abortActiveFreeMove, canvasScale, isWorking, resetIframeInteractionStyles, toolMode]);
+  }, [abortActiveFreeMove, canvasScale, isWorking, resetIframeInteractionStyles, setCanvasScaleAroundPoint, toolMode]);
 
   const refreshIframeWiring = useCallback(() => {
     iframeCleanupRef.current();
@@ -1967,37 +2166,36 @@ export default function Home() {
     setPanelTab("chat");
     setPanelOpen(true);
     setPrompt("");
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
   };
 
-  const sendPrompt = async () => {
-    if (hasStagedMoves && collaborationMode === "cowork") {
-      showToast("请先确认或放弃移动草稿");
-      return;
-    }
-    const instruction = prompt.trim();
-    if ((!instruction && !attachments.length) || isWorking) return;
-    const finalInstruction = instruction || "请参考附件优化当前页面。";
+  const executeAgentJob = useCallback(async (job: AgentJob) => {
+    const sourceHtml = currentHtml;
+    const finalInstruction = job.instruction;
     const requestRevision = documentRevisionRef.current;
-    const selectedContext = selection;
-    const sentAttachments = attachments;
+    const selectedContext = job.selection;
+    const sentAttachments = job.attachments;
     const prepared = prepareTransformHtml(currentHtml, selectedContext, finalInstruction);
-
-    setMessages((items) => [
-      ...items,
-      { id: makeId("user"), role: "user", text: finalInstruction },
-    ]);
-    setPrompt("");
-    setAttachments([]);
-    setProjectMenuOpen(false);
+    updateModeMessage(job.mode, job.messageId, {
+      queueState: "running",
+      detail:
+        job.priority === "steer"
+          ? "Steer · 正在优先跟进"
+          : job.priority === "queued"
+            ? "Queue · 正在执行"
+            : undefined,
+    });
+    setActiveAgentJob(job);
     setIsWorking(true);
 
     try {
-      if (collaborationMode === "chat") {
+      if (job.mode === "chat") {
         let reply: string;
-        if (modelConfig.protocol === "demo") {
+        if (job.config.protocol === "demo") {
           await new Promise((resolve) => window.setTimeout(resolve, 420));
-          reply = selection
-            ? `可以。当前上下文是「${selection.label}」。我们可以先讨论它的信息、视觉层级和交互目标；Chat 模式不会直接修改画布。`
+          reply = selectedContext
+            ? `可以。当前上下文是「${selectedContext.label}」。我们可以先讨论它的信息、视觉层级和交互目标；Chat 模式不会直接修改画布。`
             : "可以。我们可以从目标用户、信息层级、视觉方向或实现取舍开始讨论；Chat 模式不会直接修改画布。";
         } else {
           const response = await fetch("/api/transform", {
@@ -2005,8 +2203,8 @@ export default function Home() {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               mode: "chat",
-              config: modelConfig,
-              html: currentHtml,
+              config: job.config,
+              html: sourceHtml,
               instruction: finalInstruction,
               selection: selectedContext,
               attachments: sentAttachments,
@@ -2021,14 +2219,11 @@ export default function Home() {
           }
           reply = payload.reply;
         }
-        setMessages((items) => [
-          ...items,
-          {
-            id: makeId("chat-assistant"),
-            role: "assistant",
-            text: reply,
-          },
-        ]);
+        appendModeMessage(job.mode, {
+          id: makeId("chat-assistant"),
+          role: "assistant",
+          text: reply,
+        });
         return;
       }
 
@@ -2036,12 +2231,12 @@ export default function Home() {
       if (prepared.insertionRequested && !prepared.insertionExpected) {
         throw new Error("无法确定这个位置的安全插入边界。请缩小圈选范围，或直接选中目标容器后重试。");
       }
-      if (modelConfig.protocol === "demo" && prepared.insertionRequested) {
+      if (job.config.protocol === "demo" && prepared.insertionRequested) {
         throw new Error("演示模型暂不生成新组件。请连接实际模型后重试。");
       }
-      if (modelConfig.protocol === "demo") {
+      if (job.config.protocol === "demo") {
         await new Promise((resolve) => window.setTimeout(resolve, 620));
-        result = applyDemoEdit(currentHtml, finalInstruction, selectedContext);
+        result = applyDemoEdit(sourceHtml, finalInstruction, selectedContext);
       } else {
         const requestTransform = async (requestInstruction: string) => {
           const response = await fetch("/api/transform", {
@@ -2049,7 +2244,7 @@ export default function Home() {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               mode: "cowork",
-              config: modelConfig,
+              config: job.config,
               html: prepared.html,
               instruction: requestInstruction,
               selection: prepared.selection,
@@ -2102,37 +2297,174 @@ export default function Home() {
         throw new Error("生成期间画布已发生变化。已保留最新版本，本次 AI 结果未应用。");
       }
       commitHtml(result.html);
-      setMessages((items) => [
-        ...items,
-        {
-          id: makeId("assistant"),
-          role: "assistant",
-          text: "修改完成",
-          detail: result.summary,
-        },
-      ]);
+      appendModeMessage(job.mode, {
+        id: makeId("assistant"),
+        role: "assistant",
+        text: "修改完成",
+        detail: result.summary,
+      });
       showToast("页面已更新");
     } catch (error) {
       const message = error instanceof Error ? error.message : "请求失败，请检查模型连接";
-      setMessages((items) => [
-        ...items,
-        {
-          id: makeId("error"),
-          role: "assistant",
-          text: "这次没有应用修改",
-          detail: message,
-          error: true,
-        },
-      ]);
+      appendModeMessage(job.mode, {
+        id: makeId("error"),
+        role: "assistant",
+        text: job.mode === "cowork" ? "这次没有应用修改" : "这次没有完成回复",
+        detail: message,
+        error: true,
+      });
     } finally {
+      updateModeMessage(job.mode, job.messageId, {
+        queueState: undefined,
+        detail: undefined,
+      });
+      setActiveAgentJob(null);
       setIsWorking(false);
     }
+  }, [appendModeMessage, commitHtml, currentHtml, showToast, updateModeMessage]);
+
+  useEffect(() => {
+    if (isWorking || activeAgentJob || agentQueue.length === 0) return;
+    const [nextJob, ...remainingJobs] = agentQueue;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setAgentQueue(remainingJobs);
+      void executeAgentJob(nextJob);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgentJob, agentQueue, executeAgentJob, isWorking]);
+
+  const queueAgentMessage = (priority: AgentJobPriority) => {
+    if (hasStagedMoves && collaborationMode === "cowork") {
+      showToast("请先确认或放弃移动草稿");
+      return;
+    }
+    const instruction = prompt.trim();
+    if (!instruction && !attachments.length) return;
+    const finalInstruction = instruction || "请参考附件优化当前页面。";
+    const jobId = makeId("agent-job");
+    const messageId = makeId("user");
+    const job: AgentJob = {
+      id: jobId,
+      messageId,
+      mode: collaborationMode,
+      instruction: finalInstruction,
+      attachments,
+      selection,
+      priority,
+      config: { ...modelConfig },
+    };
+    const modeHistory = promptHistoryRef.current[collaborationMode];
+    if (modeHistory[modeHistory.length - 1] !== finalInstruction) {
+      promptHistoryRef.current[collaborationMode] = [
+        ...modeHistory,
+        finalInstruction,
+      ].slice(-50);
+    }
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    appendModeMessage(collaborationMode, {
+      id: messageId,
+      jobId,
+      role: "user",
+      text: finalInstruction,
+      queueState:
+        priority === "steer"
+          ? "steer"
+          : priority === "queued"
+            ? "queued"
+            : undefined,
+      detail:
+        priority === "steer"
+          ? "Steer · 当前任务后优先"
+          : priority === "queued"
+            ? "Queue · 等待执行"
+            : undefined,
+    });
+    setAgentQueue((jobs) =>
+      priority === "steer" ? [job, ...jobs] : [...jobs, job],
+    );
+    setPrompt("");
+    setAttachments([]);
+    setProjectMenuOpen(false);
+  };
+
+  const removeQueuedJob = (jobId: string) => {
+    const job = agentQueue.find((candidate) => candidate.id === jobId);
+    if (!job) return;
+    setAgentQueue((jobs) => jobs.filter((candidate) => candidate.id !== jobId));
+    const setter = job.mode === "cowork" ? setCoworkMessages : setChatMessages;
+    setter((items) => items.filter((item) => item.jobId !== jobId));
   };
 
   const handlePromptKeydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "ArrowUp") {
+      const history = promptHistoryRef.current[collaborationMode];
+      const beforeCursor = event.currentTarget.value.slice(
+        0,
+        event.currentTarget.selectionStart,
+      );
+      if (
+        history.length > 0 &&
+        event.currentTarget.selectionStart === event.currentTarget.selectionEnd &&
+        !beforeCursor.includes("\n")
+      ) {
+        event.preventDefault();
+        if (promptHistoryIndexRef.current === null) {
+          promptHistoryDraftRef.current = prompt;
+          promptHistoryIndexRef.current = history.length - 1;
+        } else {
+          promptHistoryIndexRef.current = Math.max(
+            0,
+            promptHistoryIndexRef.current - 1,
+          );
+        }
+        const previousPrompt = history[promptHistoryIndexRef.current];
+        setPrompt(previousPrompt);
+        window.requestAnimationFrame(() => {
+          const textarea = promptRef.current;
+          if (textarea) {
+            textarea.setSelectionRange(
+              previousPrompt.length,
+              previousPrompt.length,
+            );
+          }
+        });
+        return;
+      }
+    }
+    if (
+      event.key === "ArrowDown" &&
+      promptHistoryIndexRef.current !== null &&
+      event.currentTarget.selectionStart === event.currentTarget.selectionEnd &&
+      !event.currentTarget.value
+        .slice(event.currentTarget.selectionEnd)
+        .includes("\n")
+    ) {
+      event.preventDefault();
+      const history = promptHistoryRef.current[collaborationMode];
+      const nextIndex = promptHistoryIndexRef.current + 1;
+      const nextPrompt =
+        nextIndex >= history.length
+          ? promptHistoryDraftRef.current
+          : history[nextIndex];
+      promptHistoryIndexRef.current =
+        nextIndex >= history.length ? null : nextIndex;
+      setPrompt(nextPrompt);
+      window.requestAnimationFrame(() => {
+        const textarea = promptRef.current;
+        if (textarea) {
+          textarea.setSelectionRange(nextPrompt.length, nextPrompt.length);
+        }
+      });
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void sendPrompt();
+      queueAgentMessage(isWorking ? "queued" : "normal");
     }
   };
 
@@ -2189,6 +2521,7 @@ export default function Home() {
 
   const applyProjectReplacement = (replacement: ProjectReplacement) => {
     documentRevisionRef.current += 1;
+    setAgentQueue([]);
     stagedMovesRef.current.clear();
     setStagedMoves([]);
     setFreeMoveSteps([]);
@@ -2215,8 +2548,8 @@ export default function Home() {
   };
 
   const requestProjectReplacement = (replacement: ProjectReplacement) => {
-    if (isWorking) {
-      showToast("请等待当前 AI 修改完成");
+    if (hasAgentWork) {
+      showToast("请等待当前 Agent 队列完成");
       return;
     }
     setProjectMenuOpen(false);
@@ -2237,8 +2570,8 @@ export default function Home() {
   };
 
   const openHtmlProject = async (file: File) => {
-    if (isWorking) {
-      showToast("请等待当前 AI 修改完成");
+    if (hasAgentWork) {
+      showToast("请等待当前 Agent 队列完成");
       return;
     }
     if (file.size > 2 * 1024 * 1024) {
@@ -2247,6 +2580,10 @@ export default function Home() {
     }
     try {
       const source = (await readFileAsText(file)).replace(/^\uFEFF/, "");
+      if (hasAgentWorkRef.current) {
+        showToast("文件已读取，但当前 Agent 队列仍在运行，请稍后重新打开");
+        return;
+      }
       if (!source.trim()) {
         showToast(`${file.name} 是空文件`);
         return;
@@ -2267,7 +2604,12 @@ export default function Home() {
   };
 
   const resetProject = () => {
+    if (hasAgentWork) {
+      showToast("请等待当前 Agent 队列完成后再重置");
+      return;
+    }
     documentRevisionRef.current += 1;
+    setAgentQueue([]);
     stagedMovesRef.current.clear();
     setStagedMoves([]);
     setFreeMoveSteps([]);
@@ -2298,7 +2640,7 @@ export default function Home() {
             ref={projectTriggerRef}
             className={`project-switcher ${projectMenuOpen ? "open" : ""}`}
             onClick={() => setProjectMenuOpen((open) => !open)}
-            disabled={isWorking}
+            disabled={hasAgentWork}
             aria-expanded={projectMenuOpen}
             aria-controls="project-menu"
             type="button"
@@ -2335,7 +2677,7 @@ export default function Home() {
             <button onClick={hasStagedMoves ? undoStagedMove : undo} disabled={hasStagedMoves ? !freeMoveSteps.length : !canUndo} aria-label="撤销" title="撤销 · ⌘Z" type="button"><Undo2 size={17} /></button>
             <button onClick={redo} disabled={hasStagedMoves || !canRedo} aria-label="重做" title="重做 · ⇧⌘Z" type="button"><Redo2 size={17} /></button>
           </div>
-          <button className="ghost-action hide-on-small" onClick={resetProject} type="button"><RotateCcw size={15} />重置</button>
+          <button className="ghost-action hide-on-small" onClick={resetProject} disabled={hasAgentWork} type="button"><RotateCcw size={15} />重置</button>
           <button className="ghost-action" onClick={openSettings} type="button">
             <span className="provider-mini" style={{ background: provider.color }} />
             <span className="hide-on-small">{provider.name}</span>
@@ -2406,13 +2748,35 @@ export default function Home() {
             </div>
             <div className="canvas-viewport-controls">
               <div className="device-tabs" aria-label="预览尺寸">
-                <button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")} aria-label="桌面预览" type="button"><Monitor size={16} /></button>
-                <button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="平板预览" type="button"><Tablet size={16} /></button>
-                <button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="手机预览" type="button"><Smartphone size={16} /></button>
+                <button className={device === "desktop" ? "active" : ""} onClick={() => changeDevice("desktop")} aria-label="桌面预览" type="button"><Monitor size={16} /></button>
+                <button className={device === "tablet" ? "active" : ""} onClick={() => changeDevice("tablet")} aria-label="平板预览" type="button"><Tablet size={16} /></button>
+                <button className={device === "mobile" ? "active" : ""} onClick={() => changeDevice("mobile")} aria-label="手机预览" type="button"><Smartphone size={16} /></button>
               </div>
               <span className="canvas-size">
                 {deviceSize.width} × {deviceSize.height}
-                <em>{canvasScalePercent}%</em>
+                <span className="canvas-zoom-controls" aria-label="画布缩放">
+                  <button
+                    onClick={() => setCanvasScaleAroundPoint(canvasScale - 0.1)}
+                    disabled={canvasScale <= MIN_CANVAS_SCALE + 0.01}
+                    aria-label="缩小画布"
+                    title="缩小画布"
+                    type="button"
+                  ><Minus size={12} /></button>
+                  <button
+                    className={canvasIsFit ? "fit" : ""}
+                    onClick={resetCanvasZoom}
+                    aria-label={`适应画布，当前 ${canvasScalePercent}%`}
+                    title="适应画布"
+                    type="button"
+                  ><span>{canvasScalePercent}%</span><Maximize2 size={10} /></button>
+                  <button
+                    onClick={() => setCanvasScaleAroundPoint(canvasScale + 0.1)}
+                    disabled={canvasScale >= MAX_CANVAS_SCALE - 0.01}
+                    aria-label="放大画布"
+                    title="放大画布"
+                    type="button"
+                  ><Plus size={12} /></button>
+                </span>
               </span>
             </div>
             <div className="mobile-history-actions" aria-label="版本操作">
@@ -2432,7 +2796,7 @@ export default function Home() {
             onDrop={handleDrop}
           >
             <div
-              className="device-stage"
+              className={`device-stage ${canvasIsFit ? "" : "user-zoomed"}`}
               style={{
                 width: deviceSize.width * canvasScale,
                 height: deviceSize.height * canvasScale,
@@ -2583,7 +2947,7 @@ export default function Home() {
                       </div>
                     </article>
                   ))}
-                  {isWorking && (
+                  {isWorking && activeAgentJob?.mode === collaborationMode && (
                     <article className="message assistant working">
                       <span className="message-avatar"><Wand2 size={14} /></span>
                       <div className="message-bubble"><p><Loader2 className="spin" size={14} />{collaborationMode === "cowork" ? "正在理解页面并生成修改…" : "正在思考并组织回复…"}</p></div>
@@ -2605,6 +2969,32 @@ export default function Home() {
               </div>
 
               <div className="composer-wrap">
+                {(activeAgentJob?.mode === collaborationMode ||
+                  agentQueue.some((job) => job.mode === collaborationMode)) && (
+                  <div className="agent-followups">
+                    {activeAgentJob?.mode === collaborationMode && (
+                      <div className="active-agent-job">
+                        <Loader2 className="spin" size={13} />
+                        <span>
+                          <strong>正在处理</strong>
+                          <small>{activeAgentJob.instruction}</small>
+                        </span>
+                      </div>
+                    )}
+                    {agentQueue
+                      .filter((job) => job.mode === collaborationMode)
+                      .map((job) => (
+                        <div className={`queued-agent-job ${job.priority}`} key={job.id}>
+                          {job.priority === "steer" ? <Route size={13} /> : <ListPlus size={13} />}
+                          <span>
+                            <strong>{job.priority === "steer" ? "Steer" : `Queue ${agentQueue.indexOf(job) + 1}`}</strong>
+                            <small>{job.instruction}</small>
+                          </span>
+                          <button onClick={() => removeQueuedJob(job.id)} aria-label={`移除 ${job.instruction}`} type="button"><X size={12} /></button>
+                        </div>
+                      ))}
+                  </div>
+                )}
                 {selection && (
                   <div className="selection-chip">
                     {selection.type === "element" ? <MousePointer2 size={13} /> : selection.type === "region" ? <BoxSelect size={13} /> : <Pencil size={13} />}
@@ -2630,7 +3020,11 @@ export default function Home() {
                   <textarea
                     ref={promptRef}
                     value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
+                    onChange={(event) => {
+                      setPrompt(event.target.value);
+                      promptHistoryIndexRef.current = null;
+                      promptHistoryDraftRef.current = "";
+                    }}
                     onKeyDown={handlePromptKeydown}
                     placeholder={
                       collaborationMode === "chat"
@@ -2642,16 +3036,40 @@ export default function Home() {
                           : "描述你想要的页面修改…"
                     }
                     rows={3}
-                    disabled={isWorking}
                   />
                   <div className="composer-actions">
                     <div>
                       <button onClick={() => fileInputRef.current?.click()} aria-label="添加文档" title="添加文本、Markdown、HTML 或 CSS" type="button"><Paperclip size={17} /></button>
                       <button onClick={() => imageInputRef.current?.click()} aria-label="添加参考图" title="添加参考图" type="button"><ImageIcon size={17} /></button>
                     </div>
-                    <button className="send-button" onClick={() => void sendPrompt()} disabled={isWorking || (collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
-                      {isWorking ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
-                    </button>
+                    {isWorking ? (
+                      <div className="followup-actions">
+                        <button
+                          className="queue-button"
+                          onClick={() => queueAgentMessage("queued")}
+                          disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)}
+                          aria-label="加入队列"
+                          title="当前任务完成后按顺序执行"
+                          type="button"
+                        >
+                          <ListPlus size={15} /><span>Queue</span>
+                        </button>
+                        <button
+                          className="steer-button"
+                          onClick={() => queueAgentMessage("steer")}
+                          disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)}
+                          aria-label="优先跟进"
+                          title="当前任务完成后优先执行"
+                          type="button"
+                        >
+                          <Route size={15} /><span>Steer</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="send-button" onClick={() => queueAgentMessage("normal")} disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
+                        <Send size={17} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="composer-meta">
