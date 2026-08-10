@@ -75,6 +75,17 @@ function envAllowsPrivateEndpoints() {
   );
 }
 
+function isDevelopmentRuntime() {
+  const viteEnvironment = (
+    import.meta as ImportMeta & { env?: { DEV?: boolean } }
+  ).env;
+  return (
+    viteEnvironment?.DEV === true ||
+    typeof process !== "undefined" &&
+    process.env.NODE_ENV === "development"
+  );
+}
+
 function isPrivateHostname(hostname: string) {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (
@@ -117,10 +128,17 @@ function resolveEndpoint(baseUrl: string, protocol: ProviderProtocol) {
   if (url.username || url.password) {
     throw new Error("请不要把用户名或密码写入节点地址");
   }
-  if (privateEndpoint && !envAllowsPrivateEndpoints()) {
+  if (privateEndpoint && !envAllowsPrivateEndpoints() && !isDevelopmentRuntime()) {
     throw new Error(
       "当前部署未允许访问本地或局域网节点。自托管时请启用 ALLOW_PRIVATE_LLM_ENDPOINTS。",
     );
+  }
+
+  if (
+    url.hostname === "host.docker.internal" &&
+    isDevelopmentRuntime()
+  ) {
+    url.hostname = "127.0.0.1";
   }
 
   const cleanPath = url.pathname.replace(/\/+$/, "");

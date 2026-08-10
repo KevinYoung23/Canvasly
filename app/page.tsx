@@ -2639,6 +2639,27 @@ export default function Home() {
 
               {draftConfig.protocol !== "demo" && (
                 <div className="connection-fields">
+                  {draftConfig.providerId === "custom" && (
+                    <div className="protocol-field">
+                      <span>请求协议 <small>Endpoint API</small></span>
+                      <div className="protocol-options" role="group" aria-label="自定义节点请求协议">
+                        <button
+                          className={draftConfig.protocol === "openai-responses" ? "active" : ""}
+                          onClick={() => setDraftConfig((config) => ({ ...config, protocol: "openai-responses" }))}
+                          type="button"
+                        >
+                          Responses API
+                        </button>
+                        <button
+                          className={draftConfig.protocol === "openai-chat" ? "active" : ""}
+                          onClick={() => setDraftConfig((config) => ({ ...config, protocol: "openai-chat" }))}
+                          type="button"
+                        >
+                          Chat Completions
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <label>
                     <span>节点地址 <small>Base URL</small></span>
                     <input value={draftConfig.baseUrl} onChange={(event) => setDraftConfig((config) => ({ ...config, baseUrl: event.target.value }))} placeholder="https://api.example.com/v1" autoComplete="url" />
@@ -2651,10 +2672,10 @@ export default function Home() {
                     <span>API 密钥 <small>仅保留在当前会话</small></span>
                     <input type="password" value={draftConfig.apiKey} onChange={(event) => setDraftConfig((config) => ({ ...config, apiKey: event.target.value }))} placeholder={PROVIDERS.find((item) => item.id === draftConfig.providerId)?.keyPlaceholder} autoComplete="off" />
                   </label>
-                  {(draftConfig.providerId === "local" || draftConfig.providerId === "copilot") && (
+                  {(draftConfig.providerId === "local" || draftConfig.providerId === "copilot" || draftConfig.providerId === "custom") && (
                     <div className="local-note">
                       <Monitor size={15} />
-                      Docker 用户请使用 <code>host.docker.internal</code> 指向宿主机；非 Docker 运行可改为 <code>127.0.0.1</code>。
+                      本机开发可使用 <code>127.0.0.1</code>；Docker 中请用 <code>host.docker.internal</code> 指向宿主机。
                     </div>
                   )}
                 </div>

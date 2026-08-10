@@ -1760,8 +1760,55 @@ textarea:focus-visible {
 
 .connection-fields label:first-child,
 .connection-fields label:last-of-type,
+.connection-fields .protocol-field,
 .connection-fields .local-note {
   grid-column: 1 / -1;
+}
+
+.protocol-field {
+  display: grid;
+  gap: 6px;
+}
+
+.protocol-field > span {
+  display: flex;
+  justify-content: space-between;
+  color: #5c5763;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.protocol-field small {
+  color: #aaa6af;
+  font-size: 8px;
+  font-weight: 450;
+}
+
+.protocol-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #e1dee5;
+  border-radius: 9px;
+  background: #f4f3f6;
+}
+
+.protocol-options button {
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #817c87;
+  font-size: 9px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.protocol-options button.active {
+  background: white;
+  color: #37323d;
+  box-shadow: 0 2px 7px rgba(42, 36, 50, 0.08);
 }
 
 .connection-fields label > span {

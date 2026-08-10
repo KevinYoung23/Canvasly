@@ -3,7 +3,12 @@ import { CopilotClient } from "@github/copilot-sdk";
 
 const port = Number(process.env.COPILOT_BRIDGE_PORT || 4141);
 const bridgeKey = process.env.COPILOT_BRIDGE_API_KEY || "";
-const client = new CopilotClient({ useLoggedInUser: false });
+const explicitGitHubToken =
+  process.env.COPILOT_GITHUB_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "";
+const client = new CopilotClient({
+  gitHubToken: explicitGitHubToken || undefined,
+  useLoggedInUser: !explicitGitHubToken,
+});
 let clientStarted = false;
 let activeRequests = 0;
 
@@ -69,12 +74,22 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 
   if (request.method === "GET" && url.pathname === "/health") {
-    return writeJson(response, 200, {
-      status: "ok",
-      authenticated: Boolean(
-        process.env.COPILOT_GITHUB_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN,
-      ),
-    });
+    try {
+      await ensureClient();
+      const auth = await client.getAuthStatus();
+      return writeJson(response, 200, {
+        status: "ok",
+        authenticated: Boolean(auth?.isAuthenticated),
+        authType: explicitGitHubToken ? "token" : "logged-in-user",
+      });
+    } catch (error) {
+      return writeJson(response, 503, {
+        status: "unavailable",
+        authenticated: false,
+        authType: explicitGitHubToken ? "token" : "logged-in-user",
+        error: error instanceof Error ? error.message : "Copilot login unavailable",
+      });
+    }
   }
 
   if (request.method !== "POST" || !url.pathname.endsWith("/chat/completions")) {

@@ -60,15 +60,23 @@ docker compose down
 | Claude | Anthropic Messages | `https://api.anthropic.com` | 原生 Claude 接口 |
 | Qwen | OpenAI Chat Completions | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 可替换为工作空间专属节点 |
 | DeepSeek | OpenAI Chat Completions | `https://api.deepseek.com` | 兼容 DeepSeek 官方接口 |
-| GitHub Copilot | Copilot SDK bridge / gateway | `http://host.docker.internal:4141/v1` | 可使用随项目提供的官方 SDK bridge，或已有的 Copilot 网关 |
+| GitHub Copilot | Responses API / 本机登录 | `http://host.docker.internal:4141/v1` | 可直接使用本机已登录的服务，通常无需 API 密钥 |
 | 本地模型 | OpenAI Chat Completions | `http://host.docker.internal:11434/v1` | 适用于 Ollama、LM Studio、vLLM 等 |
-| 自定义 | OpenAI Chat Completions | 用户填写 | 适用于其他兼容服务 |
+| 自定义 | Responses API / Chat Completions | `http://127.0.0.1:4141/v1` | 默认模型 `gpt-5.5`，也可改为其他兼容服务并切换协议 |
 
 对于不需要 API 密钥的本地节点，密钥栏可以留空。
 
 ### GitHub Copilot
 
-Canvasly 提供一个基于官方 `@github/copilot-sdk` 的可选 bridge。先将 `.env.example` 复制为 `.env`，填写 `COPILOT_GITHUB_TOKEN`，再运行：
+如果本机 `4141` 已提供 OpenAI Responses-compatible 服务，在 Canvasly 中直接选择 “GitHub Copilot” 即可，API 密钥留空。本地 `npm run dev` 会自动允许该 localhost 节点。
+
+Canvasly 也提供一个基于官方 `@github/copilot-sdk` 的可选 bridge。安装 GitHub Copilot CLI 后先登录：
+
+```bash
+copilot login
+```
+
+bridge 会优先复用该登录用户，无需 token。然后运行：
 
 ```bash
 ./install.sh --copilot
@@ -80,7 +88,7 @@ Windows：
 powershell -ExecutionPolicy Bypass -File .\install.ps1 --copilot
 ```
 
-之后在 Canvasly 中选择 “GitHub Copilot”。如果设置了 `COPILOT_BRIDGE_API_KEY`，还需要把相同值填入界面的 API 密钥栏。
+之后在 Canvasly 中选择 “GitHub Copilot”。只有主动设置了 `COPILOT_BRIDGE_API_KEY` 时，才需要把相同值填入界面的 API 密钥栏。
 
 也可以不启动内置 bridge，直接填写你已有的 OpenAI-compatible Copilot 网关节点。
 
