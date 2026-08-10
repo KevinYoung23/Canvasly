@@ -19,6 +19,21 @@ type SelectionContext = {
   selector?: string;
   html?: string;
   anchors?: string[];
+  placement?: {
+    relation?: "prepend" | "between" | "append";
+    axis?: "horizontal" | "vertical";
+    parentSelector?: string;
+    previousSelector?: string;
+    nextSelector?: string;
+    xPercent?: number;
+    yPercent?: number;
+    parentPath?: number[];
+    childIndex?: number;
+    parentAnchor?: string;
+    previousAnchor?: string;
+    nextAnchor?: string;
+    slotAnchor?: string;
+  };
   targets?: Array<{
     label?: string;
     selector?: string;
@@ -139,10 +154,12 @@ Requirements:
 4. Do not add external JavaScript dependencies. Avoid remote assets unless the user explicitly asks for them.
 5. Always make an actual change that satisfies the user's instruction; never return the input unchanged.
 6. If selected context is provided, its anchors identify the exact DOM targets inside CURRENT HTML. The first anchor is the primary target. Make the requested local change there, not in a visually similar element elsewhere. Region and drawing targets are ordered by geometric relevance.
-7. Unless the user explicitly asks for a global change, preserve content and layout outside the selected targets. Shared CSS may be adjusted only as needed for the selected targets.
-8. If an image is attached, use it as visual direction or content according to the instruction.
-9. Preserve all data-canvasly-edit-target attributes exactly; the application removes them after applying the edit.
-10. Do not explain your reasoning.
+7. Selection placement describes the exact DOM boundary represented by a region or drawing. parentAnchor is the containing element; previousAnchor and nextAnchor are the adjacent siblings around that boundary.
+8. When placement.slotAnchor is present, the user is adding new content. Put every requested new visual component root inside that slot element. Keep the slot as the same plain div with only its existing data-canvasly-insertion-slot attribute, at its exact parentPath, childIndex, and sibling position. Do not turn the slot itself into the component or place the requested component elsewhere. Styles for the new component may still be added to the document head.
+9. Unless the user explicitly asks for a global change, preserve content and layout outside the selected targets. Shared CSS may be adjusted only as needed for the selected targets.
+10. If an image is attached, use it as visual direction or content according to the instruction.
+11. Preserve all data-canvasly-edit-target, data-canvasly-placement-anchor, and data-canvasly-insertion-slot attributes exactly; the application removes them after applying the edit.
+12. Do not explain your reasoning.
 
 Return ONLY valid JSON in this exact shape:
 {"html":"<!doctype html>...complete document...","summary":"A concise Chinese summary of what changed"}`;
@@ -162,6 +179,7 @@ function buildUserPrompt(
           selector: selection.selector,
           html: selection.html?.slice(0, 3_000),
           anchors: selection.anchors?.slice(0, 6),
+          placement: selection.placement,
           targets: selection.targets?.slice(0, 6).map((target) => ({
             label: target.label,
             selector: target.selector,

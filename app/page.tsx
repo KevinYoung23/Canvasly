@@ -72,6 +72,22 @@ type SelectionTarget = {
   rect: Rect;
 };
 
+type SelectionPlacement = {
+  relation: "prepend" | "between" | "append";
+  axis: "horizontal" | "vertical";
+  parentSelector: string;
+  previousSelector?: string;
+  nextSelector?: string;
+  xPercent: number;
+  yPercent: number;
+  parentPath?: number[];
+  childIndex?: number;
+  parentAnchor?: string;
+  previousAnchor?: string;
+  nextAnchor?: string;
+  slotAnchor?: string;
+};
+
 type SelectionContext = {
   type: "element" | "region" | "drawing";
   label: string;
@@ -79,6 +95,7 @@ type SelectionContext = {
   html?: string;
   targets?: SelectionTarget[];
   anchors?: string[];
+  placement?: SelectionPlacement;
   rect: Rect;
 };
 
@@ -132,6 +149,8 @@ const INITIAL_MESSAGES: ChatMessage[] = [
 
 const initialProvider = PROVIDERS[0];
 const EDIT_TARGET_ATTRIBUTE = "data-canvasly-edit-target";
+const PLACEMENT_ANCHOR_ATTRIBUTE = "data-canvasly-placement-anchor";
+const INSERTION_SLOT_ATTRIBUTE = "data-canvasly-insertion-slot";
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -284,6 +303,244 @@ function getSelectionTargets(doc: Document, rect: Rect) {
     }));
 }
 
+const COMPONENT_CONTAINER_TAGS = new Set([
+  "ARTICLE",
+  "ASIDE",
+  "BLOCKQUOTE",
+  "BODY",
+  "DIALOG",
+  "DIV",
+  "FOOTER",
+  "FORM",
+  "HEADER",
+  "LI",
+  "MAIN",
+  "NAV",
+  "SECTION",
+  "TD",
+  "TH",
+]);
+const RESTRICTIVE_CONTAINER_TAGS = new Set([
+  "COLGROUP",
+  "DL",
+  "OL",
+  "OPTGROUP",
+  "SELECT",
+  "TABLE",
+  "TBODY",
+  "TFOOT",
+  "THEAD",
+  "TR",
+  "UL",
+]);
+
+function canContainComponent(element: HTMLElement) {
+  return COMPONENT_CONTAINER_TAGS.has(element.tagName);
+}
+
+function rectCenter(rect: DOMRect) {
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+}
+
+function distanceBetween(first: Point, second: Point) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function boundaryPoint(
+  previous: DOMRect | undefined,
+  next: DOMRect | undefined,
+  axis: "horizontal" | "vertical",
+) {
+  if (previous && next) {
+    if (axis === "horizontal") {
+      return {
+        x: (previous.right + next.left) / 2,
+        y: (rectCenter(previous).y + rectCenter(next).y) / 2,
+      };
+    }
+    return {
+      x: (rectCenter(previous).x + rectCenter(next).x) / 2,
+      y: (previous.bottom + next.top) / 2,
+    };
+  }
+  const rect = previous ?? next;
+  if (!rect) return { x: 0, y: 0 };
+  if (axis === "horizontal") {
+    return { x: previous ? rect.right : rect.left, y: rectCenter(rect).y };
+  }
+  return { x: rectCenter(rect).x, y: previous ? rect.bottom : rect.top };
+}
+
+function placementForBoundary(
+  parent: HTMLElement,
+  boundaryIndex: number,
+  axis: "horizontal" | "vertical",
+  point: Point,
+): SelectionPlacement {
+  const children = Array.from(parent.children);
+  const previous = boundaryIndex > 0 ? children[boundaryIndex - 1] : undefined;
+  const next = boundaryIndex < children.length ? children[boundaryIndex] : undefined;
+  const parentRect = parent.getBoundingClientRect();
+  return {
+    relation: previous && next ? "between" : previous ? "append" : "prepend",
+    axis,
+    parentSelector: getUniqueSelector(parent),
+    previousSelector: previous ? getUniqueSelector(previous) : undefined,
+    nextSelector: next ? getUniqueSelector(next) : undefined,
+    xPercent: Number((((point.x - parentRect.left) / Math.max(1, parentRect.width)) * 100).toFixed(1)),
+    yPercent: Number((((point.y - parentRect.top) / Math.max(1, parentRect.height)) * 100).toFixed(1)),
+  };
+}
+
+function getSelectionPlacement(doc: Document, rect: Rect): SelectionPlacement | undefined {
+  const viewportWidth = Math.max(1, doc.documentElement.clientWidth);
+  const viewportHeight = Math.max(1, doc.documentElement.clientHeight);
+  const centerX = Math.min(viewportWidth - 1, Math.max(0, rect.x + rect.width / 2));
+  const centerY = Math.min(viewportHeight - 1, Math.max(0, rect.y + rect.height / 2));
+  const hit = doc.elementFromPoint(centerX, centerY);
+  const HTMLElementCtor = doc.defaultView?.HTMLElement;
+  if (!HTMLElementCtor) return undefined;
+  let candidate: Element | null = hit;
+
+  while (candidate && (!(candidate instanceof HTMLElementCtor) || !canContainComponent(candidate))) {
+    if (candidate instanceof HTMLElementCtor && RESTRICTIVE_CONTAINER_TAGS.has(candidate.tagName)) {
+      return undefined;
+    }
+    candidate = candidate.parentElement;
+  }
+  if (!(candidate instanceof HTMLElementCtor)) return undefined;
+  const parent = candidate;
+
+  const children = Array.from(parent.children);
+  const visibleChildren = children.flatMap((child, domIndex) => {
+    const bounds = child.getBoundingClientRect();
+    const childStyle = doc.defaultView?.getComputedStyle(child);
+    if (
+      bounds.width <= 1 ||
+      bounds.height <= 1 ||
+      childStyle?.display === "none" ||
+      childStyle?.visibility === "hidden" ||
+      childStyle?.position === "absolute" ||
+      childStyle?.position === "fixed"
+    ) {
+      return [];
+    }
+    return [{ child, domIndex, bounds, style: childStyle }];
+  });
+  const point = { x: centerX, y: centerY };
+  const parentRect = parent.getBoundingClientRect();
+  const style = doc.defaultView?.getComputedStyle(parent);
+  const display = style?.display ?? "block";
+  if (
+    display.includes("flex") &&
+    visibleChildren.length > 1 &&
+    (style?.flexWrap !== "nowrap" || style.flexDirection.endsWith("reverse"))
+  ) {
+    return undefined;
+  }
+  if (
+    (display.includes("flex") || display.includes("grid")) &&
+    visibleChildren.some(({ style: childStyle }) => Number(childStyle?.order ?? "0") !== 0)
+  ) {
+    return undefined;
+  }
+  if (
+    (display.includes("flex") || display.includes("grid")) &&
+    style?.direction === "rtl"
+  ) {
+    return undefined;
+  }
+  if (
+    display.includes("grid") &&
+    (style?.gridAutoFlow.includes("dense") ||
+      visibleChildren.some(({ style: childStyle }) =>
+        [
+          childStyle?.gridColumnStart,
+          childStyle?.gridColumnEnd,
+          childStyle?.gridRowStart,
+          childStyle?.gridRowEnd,
+        ].some((value) => value && value !== "auto"),
+      ))
+  ) {
+    return undefined;
+  }
+  const axis =
+    display.includes("flex") && style?.flexDirection.startsWith("row")
+      ? "horizontal"
+      : display.includes("grid") && visibleChildren.length > 1
+        ? (() => {
+            const centers = visibleChildren.map(({ bounds }) => rectCenter(bounds));
+            const xSpread = Math.max(...centers.map(({ x }) => x)) - Math.min(...centers.map(({ x }) => x));
+            const ySpread = Math.max(...centers.map(({ y }) => y)) - Math.min(...centers.map(({ y }) => y));
+            return xSpread > ySpread ? "horizontal" : "vertical";
+          })()
+        : "vertical";
+  if (display.includes("grid") && visibleChildren.length > 1) {
+    const centers = visibleChildren.map(({ bounds }) => rectCenter(bounds));
+    const columns = new Set(centers.map(({ x }) => Math.round(x / 4))).size;
+    const rows = new Set(centers.map(({ y }) => Math.round(y / 4))).size;
+    if (columns > 1 && rows > 1) return undefined;
+  }
+  if (!visibleChildren.length) {
+    return placementForBoundary(parent, children.length, axis, point);
+  }
+
+  const boundaries = [
+    {
+      index: visibleChildren[0].domIndex,
+      point: boundaryPoint(undefined, visibleChildren[0].bounds, axis),
+    },
+    ...visibleChildren.slice(1).map((next, index) => ({
+      index: next.domIndex,
+      point: boundaryPoint(visibleChildren[index].bounds, next.bounds, axis),
+    })),
+    {
+      index: visibleChildren[visibleChildren.length - 1].domIndex + 1,
+      point: boundaryPoint(visibleChildren[visibleChildren.length - 1].bounds, undefined, axis),
+    },
+  ];
+  const boundary = boundaries.reduce((closest, current) =>
+    distanceBetween(current.point, point) < distanceBetween(closest.point, point)
+      ? current
+      : closest,
+  );
+  return placementForBoundary(parent, boundary.index, axis, {
+    x: Math.min(parentRect.right, Math.max(parentRect.left, centerX)),
+    y: Math.min(parentRect.bottom, Math.max(parentRect.top, centerY)),
+  });
+}
+
+function getElementPlacement(doc: Document, element: Element): SelectionPlacement | undefined {
+  const HTMLElementCtor = doc.defaultView?.HTMLElement;
+  if (!HTMLElementCtor) return undefined;
+  if (element instanceof HTMLElementCtor && canContainComponent(element)) {
+    const rect = element.getBoundingClientRect();
+    return placementForBoundary(
+      element,
+      element.children.length,
+      "vertical",
+      { x: rect.left + rect.width / 2, y: rect.bottom },
+    );
+  }
+
+  let directChild: Element = element;
+  let parent = element.parentElement;
+  while (parent && !canContainComponent(parent)) {
+    directChild = parent;
+    parent = parent.parentElement;
+  }
+  if (!parent) return undefined;
+  const index = Array.from(parent.children).indexOf(directChild);
+  if (index < 0) return undefined;
+  const rect = directChild.getBoundingClientRect();
+  return placementForBoundary(
+    parent,
+    index + 1,
+    "vertical",
+    { x: rect.left + rect.width / 2, y: rect.bottom },
+  );
+}
+
 function toSvgPath(points: Point[]) {
   if (!points.length) return "";
   return points.reduce(
@@ -297,25 +554,170 @@ function serializeDocument(doc: Document) {
   return `<!doctype html>\n${doc.documentElement.outerHTML}`;
 }
 
-function prepareTransformHtml(source: string, selection: SelectionContext | null) {
+function hasReservedTransformAttributes(source: string) {
+  return new RegExp(
+    `${EDIT_TARGET_ATTRIBUTE}|${PLACEMENT_ANCHOR_ATTRIBUTE}|${INSERTION_SLOT_ATTRIBUTE}`,
+    "i",
+  ).test(source);
+}
+
+function clearReservedTransformAttributes(doc: Document) {
+  for (const attribute of [
+    EDIT_TARGET_ATTRIBUTE,
+    PLACEMENT_ANCHOR_ATTRIBUTE,
+    INSERTION_SLOT_ATTRIBUTE,
+  ]) {
+    doc.querySelectorAll(`[${attribute}]`).forEach((element) =>
+      element.removeAttribute(attribute),
+    );
+  }
+}
+
+function normalizeTransformHtml(source: string) {
+  if (!hasReservedTransformAttributes(source)) return source;
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  clearReservedTransformAttributes(doc);
+  return serializeDocument(doc);
+}
+
+function elementPathFromDocumentRoot(doc: Document, element: Element) {
+  const path: number[] = [];
+  let current: Element | null = element;
+  while (current && current !== doc.documentElement) {
+    const parent: Element | null = current.parentElement;
+    if (!parent) return undefined;
+    const index = Array.from(parent.children).indexOf(current);
+    if (index < 0) return undefined;
+    path.unshift(index);
+    current = parent;
+  }
+  return current === doc.documentElement ? path : undefined;
+}
+
+function pathsMatch(first?: number[], second?: number[]) {
+  return Boolean(
+    first &&
+    second &&
+    first.length === second.length &&
+    first.every((value, index) => value === second[index]),
+  );
+}
+
+function isComponentInsertionInstruction(instruction: string) {
+  const component =
+    "组件|模块|区块|板块|卡片|按钮|表单|导航|菜单|横幅|通知|提示框|弹窗|列表|表格|图片|视频|页脚|页头|侧栏|工具栏|搜索框|输入框|图表";
+  const chineseCreation = new RegExp(
+    `(?:新增|新建|创建|插入|加入|放置|生成|做一个|加个|加一个|增加一个|增加一组|添加一个|添加一组|添加新的?)\\s*.{0,16}(?:${component})(?!\\s*(?:阴影|边框|圆角|间距|内边距|外边距|颜色|背景|样式|动效|层级))`,
+    "i",
+  );
+  const englishCreation =
+    /\b(?:add|append|insert|create|place|put|build|generate)\b(?!\s*(?:padding|margin|spacing|shadow|border|radius|color|background|contrast|hierarchy|style|animation|hover|font|size)\b)\s+(?:(?:a|an|one|new|another)\s+)?(?:component|section|card|button|form|panel|nav(?:bar)?|menu|banner|notice|alert|modal|list|table|image|video|footer|header|sidebar|toolbar|search|input|chart)\b|\bnew\s+(?:component|section|card|button|form|panel|nav(?:bar)?|menu|banner|notice|alert|modal|list|table|image|video|footer|header|sidebar|toolbar|search|input|chart)\b/i;
+  return (
+    chineseCreation.test(instruction) ||
+    englishCreation.test(instruction) ||
+    isComponentDuplicationInstruction(instruction)
+  );
+}
+
+function isComponentDuplicationInstruction(instruction: string) {
+  const chineseComponent =
+    "组件|模块|区块|板块|卡片|按钮|表单|导航|菜单|横幅|通知|提示框|弹窗|列表|表格|图片|视频|页脚|页头|侧栏|工具栏|搜索框|输入框|图表";
+  const chineseClone = new RegExp(
+    `克隆\\s*(?:这个|该|当前|选中的?)?\\s*.{0,12}(?:${chineseComponent})|(?:${chineseComponent})\\s*.{0,12}克隆(?:到|至)?(?:下方|下面|后面|旁边)?`,
+    "i",
+  );
+  const chineseCopy = new RegExp(
+    `(?:复制|拷贝)\\s*(?:这个|该|当前|选中的?)?\\s*.{0,12}(?:${chineseComponent})|(?:${chineseComponent})\\s*.{0,12}(?:复制|拷贝)(?:到|至)?(?:下方|下面|后面|旁边)?`,
+    "i",
+  );
+  const chineseStyleTransfer = new RegExp(
+    `(?:复制|拷贝)[^。！？]{0,30}(?:${chineseComponent})(?:的)?\\s*(?:样式|风格|格式|外观|颜色|背景|边框|阴影|间距|内边距|外边距|字体|动效|交互)`,
+    "i",
+  );
+  const englishClone =
+    /\b(?:duplicate|clone)\b[\s\S]{0,50}\b(?:component|section|card|button|form|panel|nav(?:bar)?|menu|banner|notice|alert|modal|list|table|image|video|footer|header|sidebar|toolbar|search|input|chart)\b/i;
+  const englishCopy =
+    /\bcopy\s+(?:this|the|selected|a|an)\s+(?:[a-z][\w-]*\s+){0,2}(?:component|section|card|button|form|panel|nav(?:bar)?|menu|banner|notice|alert|modal|list|table|image|video|footer|header|sidebar|toolbar|search|input|chart)\b/i;
+  const englishStyleTransfer =
+    /\bcopy\b[\s\S]{0,50}\b(?:component|section|card|button|form|panel|nav(?:bar)?|menu|banner|notice|alert|modal|list|table|image|video|footer|header|sidebar|toolbar|search|input|chart)\b(?:'s|’s)?\s+(?:style|formatting|appearance|color|background|border|shadow|spacing|padding|margin|typography|font|animation|interaction)\b/i;
+  return (
+    chineseClone.test(instruction) ||
+    englishClone.test(instruction) ||
+    (chineseCopy.test(instruction) && !chineseStyleTransfer.test(instruction)) ||
+    (englishCopy.test(instruction) && !englishStyleTransfer.test(instruction))
+  );
+}
+
+function getSourceSiblingPlacement(
+  doc: Document,
+  selector: string,
+  fallback?: SelectionPlacement,
+): SelectionPlacement | undefined {
+  let selected: Element | null = null;
+  try {
+    selected = doc.querySelector(selector);
+  } catch {
+    return undefined;
+  }
+  if (!selected) return undefined;
+
+  let directChild = selected;
+  let parent = selected.parentElement;
+  while (parent && !canContainComponent(parent)) {
+    if (RESTRICTIVE_CONTAINER_TAGS.has(parent.tagName)) return undefined;
+    directChild = parent;
+    parent = parent.parentElement;
+  }
+  if (!parent) return undefined;
+  const index = Array.from(parent.children).indexOf(directChild);
+  if (index < 0) return undefined;
+  const next = directChild.nextElementSibling;
+  return {
+    relation: next ? "between" : "append",
+    axis: fallback?.axis ?? "vertical",
+    parentSelector: getUniqueSelector(parent),
+    previousSelector: getUniqueSelector(directChild),
+    nextSelector: next ? getUniqueSelector(next) : undefined,
+    xPercent: fallback?.xPercent ?? 50,
+    yPercent: fallback?.yPercent ?? 50,
+  };
+}
+
+function prepareTransformHtml(
+  source: string,
+  selection: SelectionContext | null,
+  instruction: string,
+) {
+  const normalizedSource = normalizeTransformHtml(source);
+  const insertionRequested = Boolean(
+    selection && isComponentInsertionInstruction(instruction),
+  );
   const selectors = [
     selection?.selector,
     ...(selection?.targets?.map((target) => target.selector) ?? []),
   ].filter((selector): selector is string => Boolean(selector));
-  if (!selection || !selectors.length) {
-    return { html: source, baselineHtml: source, selection, markerToken: null };
+  if (!selection || (!selectors.length && !selection.placement)) {
+    return {
+      html: normalizedSource,
+      baselineHtml: normalizedSource,
+      selection,
+      markerToken: null,
+      insertionRequested,
+      insertionExpected: false,
+    };
   }
 
-  const doc = new DOMParser().parseFromString(source, "text/html");
+  const doc = new DOMParser().parseFromString(normalizedSource, "text/html");
   const markerToken = makeId("edit").replace(/[^a-zA-Z0-9-]/g, "");
-  const markedElements: HTMLElement[] = [];
+  const markedElements: Element[] = [];
+  const placementElements: Element[] = [];
   const anchors: string[] = [];
   const seen = new Set<Element>();
 
   for (const selector of selectors) {
-    let element: HTMLElement | null = null;
+    let element: Element | null = null;
     try {
-      element = doc.querySelector<HTMLElement>(selector);
+      element = doc.querySelector(selector);
     } catch {
       continue;
     }
@@ -327,30 +729,208 @@ function prepareTransformHtml(source: string, selection: SelectionContext | null
     anchors.push(`[${EDIT_TARGET_ATTRIBUTE}="${value}"]`);
   }
 
-  if (!anchors.length) {
-    return { html: source, baselineHtml: source, selection, markerToken: null };
+  let placement = selection.placement ? { ...selection.placement } : undefined;
+  if (selection.selector && isComponentDuplicationInstruction(instruction)) {
+    placement = getSourceSiblingPlacement(doc, selection.selector, placement);
+  }
+  if (placement) {
+    let parent: Element | null = null;
+    let requestedPrevious: Element | null = null;
+    let requestedNext: Element | null = null;
+    try {
+      parent = doc.querySelector(placement.parentSelector);
+      requestedPrevious = placement.previousSelector
+        ? doc.querySelector(placement.previousSelector)
+        : null;
+      requestedNext = placement.nextSelector
+        ? doc.querySelector(placement.nextSelector)
+        : null;
+    } catch {
+      parent = null;
+    }
+
+    let actualPrevious: Element | null = null;
+    let actualNext: Element | null = null;
+    if (parent && placement.relation === "prepend") {
+      actualNext = parent.firstElementChild;
+    } else if (parent && placement.relation === "append") {
+      actualPrevious = parent.lastElementChild;
+    } else if (parent && requestedNext?.parentElement === parent) {
+      actualNext = requestedNext;
+      actualPrevious = requestedNext.previousElementSibling;
+    } else if (parent && requestedPrevious?.parentElement === parent) {
+      actualPrevious = requestedPrevious;
+      actualNext = requestedPrevious.nextElementSibling;
+    }
+
+    placement.previousSelector = actualPrevious
+      ? getUniqueSelector(actualPrevious)
+      : undefined;
+    placement.nextSelector = actualNext ? getUniqueSelector(actualNext) : undefined;
+  }
+  const markPlacementElement = (
+    selector: string | undefined,
+    role: "parent" | "previous" | "next",
+  ) => {
+    if (!selector) return undefined;
+    let element: Element | null = null;
+    try {
+      element = doc.querySelector(selector);
+    } catch {
+      return undefined;
+    }
+    if (!element) return undefined;
+    const value = `${markerToken}-${role}`;
+    element.setAttribute(PLACEMENT_ANCHOR_ATTRIBUTE, value);
+    placementElements.push(element);
+    return `[${PLACEMENT_ANCHOR_ATTRIBUTE}="${value}"]`;
+  };
+
+  if (placement) {
+    placement.parentAnchor = markPlacementElement(placement.parentSelector, "parent");
+    placement.previousAnchor = markPlacementElement(placement.previousSelector, "previous");
+    placement.nextAnchor = markPlacementElement(placement.nextSelector, "next");
+  }
+
+  let slot: HTMLElement | null = null;
+  let insertionExpected = false;
+  const placementAttributesReady = Boolean(
+    placement?.parentAnchor &&
+    (!placement.previousSelector || placement.previousAnchor) &&
+    (!placement.nextSelector || placement.nextAnchor),
+  );
+  if (placement && insertionRequested && placementAttributesReady) {
+    const parent = doc.querySelector<HTMLElement>(placement.parentAnchor as string);
+    const previous = placement.previousAnchor
+      ? doc.querySelector(placement.previousAnchor)
+      : null;
+    const next = placement.nextAnchor
+      ? doc.querySelector(placement.nextAnchor)
+      : null;
+    const boundaryReady = Boolean(
+      parent &&
+      (placement.relation === "between"
+        ? previous?.parentElement === parent &&
+          next?.parentElement === parent &&
+          previous.nextElementSibling === next
+        : placement.relation === "append"
+          ? previous?.parentElement === parent && previous.nextElementSibling === null
+          : next
+            ? next.parentElement === parent && next.previousElementSibling === null
+            : parent.children.length === 0),
+    );
+    if (parent && boundaryReady) {
+      slot = doc.createElement("div");
+      const value = `${markerToken}-slot`;
+      slot.setAttribute(INSERTION_SLOT_ATTRIBUTE, value);
+      placement.slotAnchor = `[${INSERTION_SLOT_ATTRIBUTE}="${value}"]`;
+      if (next?.parentElement === parent) {
+        parent.insertBefore(slot, next);
+      } else if (previous?.parentElement === parent) {
+        previous.after(slot);
+      } else {
+        parent.append(slot);
+      }
+      const parentPath = elementPathFromDocumentRoot(doc, parent);
+      const childIndex = Array.from(parent.children).indexOf(slot);
+      if (parentPath && childIndex >= 0) {
+        placement.parentPath = parentPath;
+        placement.childIndex = childIndex;
+        insertionExpected = true;
+      } else {
+        slot.remove();
+        slot = null;
+        placement.slotAnchor = undefined;
+      }
+    }
+  }
+
+  if (!anchors.length && !placement?.parentAnchor) {
+    return {
+      html: normalizedSource,
+      baselineHtml: normalizedSource,
+      selection,
+      markerToken: null,
+      insertionRequested,
+      insertionExpected: false,
+    };
   }
 
   const html = serializeDocument(doc);
+  slot?.remove();
+  placementElements.forEach((element) => element.removeAttribute(PLACEMENT_ANCHOR_ATTRIBUTE));
   markedElements.forEach((element) => element.removeAttribute(EDIT_TARGET_ATTRIBUTE));
   return {
     html,
     baselineHtml: serializeDocument(doc),
-    selection: { ...selection, anchors },
+    selection: { ...selection, anchors, placement },
     markerToken,
+    insertionRequested,
+    insertionExpected,
   };
 }
 
-function cleanTransformHtml(source: string, markerToken: string | null) {
-  if (!markerToken) return source;
+function cleanTransformHtml(
+  source: string,
+  markerToken: string | null,
+  insertionExpected: boolean,
+  placement?: SelectionPlacement,
+) {
+  if (!markerToken && !hasReservedTransformAttributes(source)) {
+    return { html: source, insertionApplied: !insertionExpected };
+  }
   const doc = new DOMParser().parseFromString(source, "text/html");
-  doc.querySelectorAll(`[${EDIT_TARGET_ATTRIBUTE}]`).forEach((element) => {
-    const value = element.getAttribute(EDIT_TARGET_ATTRIBUTE);
-    if (value?.startsWith(`${markerToken}-`)) {
-      element.removeAttribute(EDIT_TARGET_ATTRIBUTE);
-    }
-  });
-  return serializeDocument(doc);
+  const slots = markerToken
+    ? Array.from(
+        doc.querySelectorAll(`[${INSERTION_SLOT_ATTRIBUTE}="${markerToken}-slot"]`),
+      )
+    : [];
+  const parents = Array.from(
+    doc.querySelectorAll(`[${PLACEMENT_ANCHOR_ATTRIBUTE}="${markerToken}-parent"]`),
+  );
+  const previousElements = Array.from(
+    doc.querySelectorAll(`[${PLACEMENT_ANCHOR_ATTRIBUTE}="${markerToken}-previous"]`),
+  );
+  const nextElements = Array.from(
+    doc.querySelectorAll(`[${PLACEMENT_ANCHOR_ATTRIBUTE}="${markerToken}-next"]`),
+  );
+  const allPlacementMarkers = doc.querySelectorAll(`[${PLACEMENT_ANCHOR_ATTRIBUTE}]`);
+  const allSlots = Array.from(doc.querySelectorAll(`[${INSERTION_SLOT_ATTRIBUTE}]`));
+  const expectsPrevious = Boolean(placement?.previousAnchor);
+  const expectsNext = Boolean(placement?.nextAnchor);
+  const expectedPlacementMarkerCount = 1 + Number(expectsPrevious) + Number(expectsNext);
+  const parent = parents[0];
+  const previous = previousElements[0];
+  const next = nextElements[0];
+  const slot = slots[0];
+  const markersIntact =
+    slots.length === 1 &&
+    parents.length === 1 &&
+    previousElements.length === Number(expectsPrevious) &&
+    nextElements.length === Number(expectsNext) &&
+    allPlacementMarkers.length === expectedPlacementMarkerCount &&
+    allSlots.length === 1;
+  const slotStayedAtBoundary =
+    markersIntact &&
+    slot.tagName === "DIV" &&
+    slot.attributes.length === 1 &&
+    slot.hasAttribute(INSERTION_SLOT_ATTRIBUTE) &&
+    slot.parentElement === parent &&
+    pathsMatch(
+      placement?.parentPath,
+      parent ? elementPathFromDocumentRoot(doc, parent) : undefined,
+    ) &&
+    Array.from(parent?.children ?? []).indexOf(slot) === placement?.childIndex &&
+    slot.previousElementSibling === (expectsPrevious ? previous : null) &&
+    slot.nextElementSibling === (expectsNext ? next : null);
+  const insertionApplied =
+    !insertionExpected ||
+    (slotStayedAtBoundary && slot.children.length > 0);
+  slots.forEach((slotElement) =>
+    slotElement.replaceWith(...Array.from(slotElement.childNodes)),
+  );
+  clearReservedTransformAttributes(doc);
+  return { html: serializeDocument(doc), insertionApplied };
 }
 
 function htmlIsUnchanged(result: string, baseline: string) {
@@ -623,6 +1203,7 @@ export default function Home() {
         label: getElementLabel(target),
         selector: getUniqueSelector(target),
         html: target.outerHTML.slice(0, 2600),
+        placement: getElementPlacement(doc, target),
         rect,
       });
       setRegionRect(null);
@@ -764,7 +1345,9 @@ export default function Home() {
       y: rect.y + layerBounds.top - (iframeBounds?.top ?? layerBounds.top),
     });
     const selectArea = (type: "region" | "drawing", rect: Rect) => {
-      const targets = doc ? getSelectionTargets(doc, toIframeRect(rect)) : [];
+      const iframeRect = toIframeRect(rect);
+      const targets = doc ? getSelectionTargets(doc, iframeRect) : [];
+      const placement = doc ? getSelectionPlacement(doc, iframeRect) : undefined;
       const primary = targets[0];
       setSelection({
         type,
@@ -772,6 +1355,7 @@ export default function Home() {
         selector: primary?.selector,
         html: primary?.html,
         targets,
+        placement,
         rect,
       });
     };
@@ -861,7 +1445,7 @@ export default function Home() {
     const finalInstruction = instruction || "请参考附件优化当前页面。";
     const selectedContext = selection;
     const sentAttachments = attachments;
-    const prepared = prepareTransformHtml(currentHtml, selectedContext);
+    const prepared = prepareTransformHtml(currentHtml, selectedContext, finalInstruction);
 
     setMessages((items) => [
       ...items,
@@ -873,7 +1457,13 @@ export default function Home() {
     setIsWorking(true);
 
     try {
-      let result: { html: string; summary: string };
+      let result: { html: string; summary: string; insertionApplied?: boolean };
+      if (prepared.insertionRequested && !prepared.insertionExpected) {
+        throw new Error("无法确定这个位置的安全插入边界。请缩小圈选范围，或直接选中目标容器后重试。");
+      }
+      if (modelConfig.protocol === "demo" && prepared.insertionRequested) {
+        throw new Error("演示模型暂不生成新组件。请连接实际模型后重试。");
+      }
       if (modelConfig.protocol === "demo") {
         await new Promise((resolve) => window.setTimeout(resolve, 620));
         result = applyDemoEdit(currentHtml, finalInstruction, selectedContext);
@@ -898,17 +1488,34 @@ export default function Home() {
           if (!response.ok || !payload.html) {
             throw new Error(payload.error || "模型没有返回可用的 HTML");
           }
+          const cleaned = cleanTransformHtml(
+            payload.html,
+            prepared.markerToken,
+            prepared.insertionExpected,
+            prepared.selection?.placement,
+          );
           return {
-            html: cleanTransformHtml(payload.html, prepared.markerToken),
+            ...cleaned,
             summary: payload.summary || "已根据描述更新页面",
           };
         };
 
         result = await requestTransform(finalInstruction);
-        if (htmlIsUnchanged(result.html, prepared.baselineHtml)) {
+        if (
+          htmlIsUnchanged(result.html, prepared.baselineHtml) ||
+          (prepared.insertionExpected && !result.insertionApplied)
+        ) {
+          const retryGuidance = prepared.insertionExpected
+            ? "上一次返回没有产生可应用的定点修改。请务必把新增组件作为 placement.slotAnchor 元素的子节点，并保留该插槽及其属性，然后返回完整 HTML。"
+            : prepared.selection?.anchors?.length
+              ? "上一次返回没有产生实际差异。请在 selected context 的首个锚点内完成所述修改，并返回修改后的完整 HTML。"
+              : "上一次返回没有产生实际差异。请完成所述修改，并返回修改后的完整 HTML。";
           result = await requestTransform(
-            `${finalInstruction}\n\n上一次返回没有产生实际差异。请务必在所标记的目标内完成这项修改，并返回修改后的完整 HTML。`,
+            `${finalInstruction}\n\n${retryGuidance}`,
           );
+        }
+        if (prepared.insertionExpected && !result.insertionApplied) {
+          throw new Error("模型没有把组件放入圈选位置，已停止应用以避免出现在错误区域。");
         }
         if (htmlIsUnchanged(result.html, prepared.baselineHtml)) {
           throw new Error("模型连续两次返回了原页面。请把修改要求写得更具体后重试。");
