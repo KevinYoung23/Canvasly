@@ -10,6 +10,7 @@ import {
   FilePlus2,
   FileText,
   FolderOpen,
+  Hand,
   Image as ImageIcon,
   ImagePlus,
   Loader2,
@@ -53,7 +54,7 @@ import {
   type ProviderProtocol,
 } from "./editor-data";
 
-type ToolMode = "select" | "move" | "region" | "draw";
+type ToolMode = "interact" | "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
 type PanelTab = "chat" | "code";
 
@@ -98,6 +99,35 @@ type SelectionContext = {
   anchors?: string[];
   placement?: SelectionPlacement;
   rect: Rect;
+};
+
+type PendingFreeMove = {
+  selector: string;
+  label: string;
+  x: number;
+  y: number;
+  originalTranslate: string;
+  originalX: string;
+  originalY: string;
+  originalOutline: string;
+  originalOutlineOffset: string;
+};
+
+type FreeMoveDrag = PendingFreeMove & {
+  startX: number;
+  startY: number;
+  beforeX: number;
+  beforeY: number;
+  wasStaged: boolean;
+  element: HTMLElement;
+};
+
+type FreeMoveStep = {
+  selector: string;
+  beforeX: number;
+  beforeY: number;
+  afterX: number;
+  afterY: number;
 };
 
 type Attachment = {
@@ -542,87 +572,37 @@ function getElementPlacement(doc: Document, element: Element): SelectionPlacemen
   );
 }
 
-function getPlacementIndicatorRect(
-  doc: Document,
-  placement: SelectionPlacement,
-): Rect | null {
-  let parent: Element | null = null;
-  let previous: Element | null = null;
-  let next: Element | null = null;
-  try {
-    parent = doc.querySelector(placement.parentSelector);
-    previous = placement.previousSelector
-      ? doc.querySelector(placement.previousSelector)
-      : null;
-    next = placement.nextSelector ? doc.querySelector(placement.nextSelector) : null;
-  } catch {
-    return null;
-  }
-  if (!parent) return null;
-
-  const parentRect = parent.getBoundingClientRect();
-  const previousRect = previous?.getBoundingClientRect();
-  const nextRect = next?.getBoundingClientRect();
-  if (placement.axis === "horizontal") {
-    const x = nextRect?.left ?? previousRect?.right ?? parentRect.left;
-    return {
-      x: x - 2,
-      y: parentRect.top,
-      width: 4,
-      height: Math.max(24, parentRect.height),
-    };
-  }
-
-  const y = nextRect?.top ?? previousRect?.bottom ?? parentRect.top;
-  return {
-    x: parentRect.left,
-    y: y - 2,
-    width: Math.max(24, parentRect.width),
-    height: 4,
-  };
+function setElementFreeMovePosition(element: HTMLElement, x: number, y: number) {
+  element.style.setProperty("--canvasly-move-x", `${x.toFixed(1)}px`);
+  element.style.setProperty("--canvasly-move-y", `${y.toFixed(1)}px`);
+  element.style.translate =
+    "var(--canvasly-move-x, 0px) var(--canvasly-move-y, 0px)";
 }
 
-function moveElementInHtml(
+function applyFreeMovesToHtml(
   source: string,
-  sourceSelector: string,
-  placement: SelectionPlacement,
+  moves: PendingFreeMove[],
 ) {
   const doc = new DOMParser().parseFromString(source, "text/html");
-  let element: Element | null = null;
-  let parent: Element | null = null;
-  let previous: Element | null = null;
-  let next: Element | null = null;
-  try {
-    element = doc.querySelector(sourceSelector);
-    parent = doc.querySelector(placement.parentSelector);
-    previous = placement.previousSelector
-      ? doc.querySelector(placement.previousSelector)
-      : null;
-    next = placement.nextSelector ? doc.querySelector(placement.nextSelector) : null;
-  } catch {
-    return null;
-  }
-  if (
-    !element ||
-    !parent ||
-    element === doc.documentElement ||
-    element === doc.body ||
-    element === parent ||
-    element.contains(parent)
-  ) {
-    return null;
+  const before = doc.documentElement.outerHTML;
+  for (const move of moves) {
+    let element: Element | null = null;
+    try {
+      element = doc.querySelector(move.selector);
+    } catch {
+      return null;
+    }
+    if (
+      !element ||
+      element === doc.documentElement ||
+      element === doc.body ||
+      !(element instanceof HTMLElement)
+    ) {
+      return null;
+    }
+    setElementFreeMovePosition(element, move.x, move.y);
   }
 
-  const before = doc.documentElement.outerHTML;
-  if (next?.parentElement === parent) {
-    parent.insertBefore(element, next);
-  } else if (previous?.parentElement === parent) {
-    previous.after(element);
-  } else if (placement.relation === "prepend") {
-    parent.prepend(element);
-  } else {
-    parent.append(element);
-  }
   const after = doc.documentElement.outerHTML;
   if (after === before) return null;
 
@@ -1166,6 +1146,7 @@ export default function Home() {
   const [device, setDevice] = useState<DeviceMode>("desktop");
   const [panelTab, setPanelTab] = useState<PanelTab>("chat");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [canvasScale, setCanvasScale] = useState(1);
   const [history, setHistory] = useState<string[]>([STARTER_HTML]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [codeDraft, setCodeDraft] = useState(STARTER_HTML);
@@ -1176,8 +1157,11 @@ export default function Home() {
   const [pendingProject, setPendingProject] = useState<ProjectReplacement | null>(null);
   const [selection, setSelection] = useState<SelectionContext | null>(null);
   const [hoverRect, setHoverRect] = useState<Rect | null>(null);
-  const [moveIndicator, setMoveIndicator] = useState<Rect | null>(null);
   const [isMovingElement, setIsMovingElement] = useState(false);
+  const [movePreview, setMovePreview] = useState<Point | null>(null);
+  const [stagedMoves, setStagedMoves] = useState<PendingFreeMove[]>([]);
+  const [freeMoveSteps, setFreeMoveSteps] = useState<FreeMoveStep[]>([]);
+  const [savedMoveHtml, setSavedMoveHtml] = useState<string | null>(null);
   const [regionRect, setRegionRect] = useState<Rect | null>(null);
   const [drawPoints, setDrawPoints] = useState<Point[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
@@ -1197,6 +1181,7 @@ export default function Home() {
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeCleanupRef = useRef<() => void>(() => undefined);
+  const canvasScrollerRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -1207,8 +1192,8 @@ export default function Home() {
   const pointerOriginRef = useRef<Point | null>(null);
   const pointerActiveRef = useRef(false);
   const selectionRef = useRef<SelectionContext | null>(null);
-  const moveSourceSelectorRef = useRef<string | null>(null);
-  const movePlacementRef = useRef<SelectionPlacement | null>(null);
+  const freeMoveDragRef = useRef<FreeMoveDrag | null>(null);
+  const stagedMovesRef = useRef<Map<string, PendingFreeMove>>(new Map());
   const documentRevisionRef = useRef(0);
 
   const currentHtml = history[historyIndex];
@@ -1216,10 +1201,13 @@ export default function Home() {
   const provider =
     PROVIDERS.find((item) => item.id === modelConfig.providerId) ?? PROVIDERS[0];
   const deviceSize = DEVICE_SIZES[device];
+  const canvasScalePercent = Math.round(canvasScale * 100);
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
-  const hasUnsavedChanges = currentHtml !== savedHtml || codeDraft !== currentHtml;
   const hasPendingCodeDraft = codeDraft !== currentHtml;
+  const hasStagedMoves = stagedMoves.length > 0;
+  const hasUnsavedChanges =
+    currentHtml !== savedHtml || hasPendingCodeDraft || hasStagedMoves;
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -1267,24 +1255,141 @@ export default function Home() {
     body.style.touchAction = mode === "move" && !isWorking ? "none" : "";
     body.style.cursor = isWorking
       ? "wait"
-      : mode === "select"
+      : mode === "select" || mode === "interact"
         ? "default"
         : mode === "move"
           ? "grab"
           : "crosshair";
   }, [isWorking]);
 
+  const restoreFreeMovePreview = useCallback(
+    (move: PendingFreeMove | FreeMoveDrag | null) => {
+      if (!move) return;
+      const doc = iframeRef.current?.contentDocument;
+      let element: HTMLElement | null = "element" in move ? move.element : null;
+      if (!element && doc) {
+        try {
+          element = doc.querySelector<HTMLElement>(move.selector);
+        } catch {
+          element = null;
+        }
+      }
+      if (!element) return;
+      if (move.originalX) {
+        element.style.setProperty("--canvasly-move-x", move.originalX);
+      } else {
+        element.style.removeProperty("--canvasly-move-x");
+      }
+      if (move.originalY) {
+        element.style.setProperty("--canvasly-move-y", move.originalY);
+      } else {
+        element.style.removeProperty("--canvasly-move-y");
+      }
+      element.style.translate = move.originalTranslate;
+      element.style.outline = move.originalOutline;
+      element.style.outlineOffset = move.originalOutlineOffset;
+    },
+    [],
+  );
+
+  const abortActiveFreeMove = useCallback(() => {
+    const drag = freeMoveDragRef.current;
+    if (!drag) return;
+    if (drag.wasStaged) {
+      setElementFreeMovePosition(drag.element, drag.beforeX, drag.beforeY);
+    } else {
+      restoreFreeMovePreview(drag);
+    }
+    freeMoveDragRef.current = null;
+    setIsMovingElement(false);
+    setMovePreview(null);
+  }, [restoreFreeMovePreview]);
+
+  const discardStagedMoves = useCallback(() => {
+    abortActiveFreeMove();
+    for (const move of stagedMovesRef.current.values()) {
+      restoreFreeMovePreview(move);
+    }
+    stagedMovesRef.current.clear();
+    setStagedMoves([]);
+    setFreeMoveSteps([]);
+    setMovePreview(null);
+    setSelection(null);
+    showToast("已放弃所有临时移动");
+  }, [abortActiveFreeMove, restoreFreeMovePreview, showToast]);
+
+  const undoStagedMove = useCallback(() => {
+    const step = freeMoveSteps[freeMoveSteps.length - 1];
+    if (!step) return;
+    const remainingSteps = freeMoveSteps.slice(0, -1);
+    const previousStep = [...remainingSteps]
+      .reverse()
+      .find((candidate) => candidate.selector === step.selector);
+    const staged = stagedMovesRef.current.get(step.selector);
+    const doc = iframeRef.current?.contentDocument;
+    let element: HTMLElement | null = null;
+    try {
+      element = doc?.querySelector<HTMLElement>(step.selector) ?? null;
+    } catch {
+      element = null;
+    }
+
+    if (!staged) return;
+    if (previousStep) {
+      const nextMove = {
+        ...staged,
+        x: previousStep.afterX,
+        y: previousStep.afterY,
+      };
+      stagedMovesRef.current.set(step.selector, nextMove);
+      if (element) {
+        setElementFreeMovePosition(element, nextMove.x, nextMove.y);
+      }
+    } else {
+      restoreFreeMovePreview(staged);
+      stagedMovesRef.current.delete(step.selector);
+    }
+    setFreeMoveSteps(remainingSteps);
+    setStagedMoves(Array.from(stagedMovesRef.current.values()));
+    setSelection(null);
+  }, [freeMoveSteps, restoreFreeMovePreview]);
+
+  const confirmStagedMoves = useCallback(() => {
+    abortActiveFreeMove();
+    const moves = Array.from(stagedMovesRef.current.values());
+    if (!moves.length) return;
+    const movedHtml = applyFreeMovesToHtml(currentHtml, moves);
+    if (!movedHtml) {
+      showToast("无法保存当前移动，请重试");
+      return;
+    }
+    stagedMovesRef.current.clear();
+    setStagedMoves([]);
+    setFreeMoveSteps([]);
+    setMovePreview(null);
+    setSelection(null);
+    commitHtml(movedHtml);
+    setSavedMoveHtml(movedHtml);
+    showToast(`已渲染 ${moves.length} 个组件的位置`);
+  }, [abortActiveFreeMove, commitHtml, currentHtml, showToast]);
+
+  const undoSavedMove = useCallback(() => {
+    if (currentHtml !== savedMoveHtml || !canUndo) return;
+    undo();
+    setSavedMoveHtml(null);
+  }, [canUndo, currentHtml, savedMoveHtml, undo]);
+
   const clearSelection = useCallback(() => {
+    abortActiveFreeMove();
     setSelection(null);
     setRegionRect(null);
     setDrawPoints([]);
     setHoverRect(null);
-    setMoveIndicator(null);
     setIsMovingElement(false);
-    moveSourceSelectorRef.current = null;
-    movePlacementRef.current = null;
+    setMovePreview(null);
+    freeMoveDragRef.current = null;
     resetIframeInteractionStyles(toolMode);
-  }, [resetIframeInteractionStyles, toolMode]);
+  }, [abortActiveFreeMove, resetIframeInteractionStyles, toolMode]);
 
   const activateTool = useCallback((mode: ToolMode) => {
     if (mode === "move" && hasPendingCodeDraft) {
@@ -1293,18 +1398,61 @@ export default function Home() {
       showToast("请先应用或放弃 HTML 草稿，再移动组件");
       return;
     }
-    moveSourceSelectorRef.current = null;
-    movePlacementRef.current = null;
-    setMoveIndicator(null);
-    setIsMovingElement(false);
+    abortActiveFreeMove();
     setHoverRect(null);
     setToolMode(mode);
     resetIframeInteractionStyles(mode);
-  }, [hasPendingCodeDraft, resetIframeInteractionStyles, showToast]);
+  }, [abortActiveFreeMove, hasPendingCodeDraft, resetIframeInteractionStyles, showToast]);
 
   useEffect(() => {
     selectionRef.current = selection;
   }, [selection]);
+
+  useEffect(() => {
+    stagedMovesRef.current = new Map(
+      stagedMoves.map((move) => [move.selector, move]),
+    );
+  }, [stagedMoves]);
+
+  useEffect(() => {
+    const scroller = canvasScrollerRef.current;
+    if (!scroller) return;
+
+    let animationFrame = 0;
+    const updateScale = () => {
+      const style = window.getComputedStyle(scroller);
+      const horizontalPadding =
+        Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+      const verticalPadding =
+        Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+      const availableWidth = Math.max(1, scroller.clientWidth - horizontalPadding);
+      const availableHeight = Math.max(1, scroller.clientHeight - verticalPadding);
+      const nextScale = Math.max(
+        0.25,
+        Math.min(
+          1,
+          availableWidth / deviceSize.width,
+          availableHeight / deviceSize.height,
+        ),
+      );
+      setCanvasScale((current) =>
+        Math.abs(current - nextScale) < 0.002 ? current : Number(nextScale.toFixed(3)),
+      );
+    };
+    const scheduleScaleUpdate = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(updateScale);
+    };
+    const observer = new ResizeObserver(scheduleScaleUpdate);
+    observer.observe(scroller);
+    window.addEventListener("resize", scheduleScaleUpdate);
+    scheduleScaleUpdate();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleScaleUpdate);
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, [deviceSize.height, deviceSize.width, panelOpen]);
 
   const wireIframe = useCallback(() => {
     const iframe = iframeRef.current;
@@ -1313,13 +1461,22 @@ export default function Home() {
 
     resetIframeInteractionStyles(toolMode);
     const ElementCtor = doc.defaultView?.Element;
+    for (const move of stagedMovesRef.current.values()) {
+      let element: HTMLElement | null = null;
+      try {
+        element = doc.querySelector<HTMLElement>(move.selector);
+      } catch {
+        element = null;
+      }
+      if (element) setElementFreeMovePosition(element, move.x, move.y);
+    }
 
     const toFrameRect = (rect: Rect) => {
       const iframeRect = iframe.getBoundingClientRect();
       const frameRect = iframe.parentElement?.getBoundingClientRect() ?? iframeRect;
       return {
-        x: rect.x + iframeRect.left - frameRect.left,
-        y: rect.y + iframeRect.top - frameRect.top,
+        x: rect.x + (iframeRect.left - frameRect.left) / canvasScale,
+        y: rect.y + (iframeRect.top - frameRect.top) / canvasScale,
         width: rect.width,
         height: rect.height,
       };
@@ -1344,33 +1501,21 @@ export default function Home() {
         return;
       }
       if (toolMode !== "move" || isWorking) return;
-      if (!moveSourceSelectorRef.current) {
+      const drag = freeMoveDragRef.current;
+      if (!drag) {
         setHoverRect(updateRect(event.target));
         return;
       }
 
       const pointerEvent = event as globalThis.PointerEvent;
-      const placement = getSelectionPlacement(doc, {
-        x: pointerEvent.clientX - 2,
-        y: pointerEvent.clientY - 2,
-        width: 4,
-        height: 4,
-      });
-      const source = doc.querySelector(moveSourceSelectorRef.current);
-      const parent = placement ? doc.querySelector(placement.parentSelector) : null;
-      if (!placement || !source || !parent || source === parent || source.contains(parent)) {
-        movePlacementRef.current = null;
-        setMoveIndicator(null);
-        return;
-      }
-
-      const indicator = getPlacementIndicatorRect(doc, placement);
-      movePlacementRef.current = placement;
-      setMoveIndicator(indicator ? toFrameRect(indicator) : null);
+      drag.x = drag.beforeX + pointerEvent.clientX - drag.startX;
+      drag.y = drag.beforeY + pointerEvent.clientY - drag.startY;
+      setElementFreeMovePosition(drag.element, drag.x, drag.y);
+      setMovePreview({ x: drag.x, y: drag.y });
     };
 
     const handleLeave = () => {
-      if (!moveSourceSelectorRef.current) setHoverRect(null);
+      if (!freeMoveDragRef.current) setHoverRect(null);
     };
 
     const handlePointerDown = (event: Event) => {
@@ -1388,20 +1533,54 @@ export default function Home() {
         ? doc.querySelector(selectionRef.current.selector)
         : null;
       const target = selected?.contains(clicked) ? selected : clicked;
-      if (["HTML", "BODY", "HEAD", "SCRIPT", "STYLE"].includes(target.tagName)) return;
+      const HTMLElementCtor = doc.defaultView?.HTMLElement;
+      if (
+        !HTMLElementCtor ||
+        !(target instanceof HTMLElementCtor) ||
+        ["HTML", "BODY", "HEAD", "SCRIPT", "STYLE"].includes(target.tagName)
+      ) {
+        return;
+      }
 
       event.preventDefault();
       event.stopPropagation();
       target.setPointerCapture?.(pointerEvent.pointerId);
       const selector = getUniqueSelector(target);
-      moveSourceSelectorRef.current = selector;
-      movePlacementRef.current = null;
+      const staged = stagedMovesRef.current.get(selector);
+      const beforeX = Number.parseFloat(
+        target.style.getPropertyValue("--canvasly-move-x"),
+      ) || 0;
+      const beforeY = Number.parseFloat(
+        target.style.getPropertyValue("--canvasly-move-y"),
+      ) || 0;
+      freeMoveDragRef.current = {
+        selector,
+        label: staged?.label ?? getElementLabel(target),
+        x: beforeX,
+        y: beforeY,
+        beforeX,
+        beforeY,
+        startX: pointerEvent.clientX,
+        startY: pointerEvent.clientY,
+        wasStaged: Boolean(staged),
+        originalTranslate: staged?.originalTranslate ?? target.style.translate,
+        originalX:
+          staged?.originalX ?? target.style.getPropertyValue("--canvasly-move-x"),
+        originalY:
+          staged?.originalY ?? target.style.getPropertyValue("--canvasly-move-y"),
+        originalOutline: staged?.originalOutline ?? target.style.outline,
+        originalOutlineOffset:
+          staged?.originalOutlineOffset ?? target.style.outlineOffset,
+        element: target,
+      };
+      target.style.outline = "2px solid #21b987";
+      target.style.outlineOffset = "4px";
       setIsMovingElement(true);
       setHoverRect(null);
-      setMoveIndicator(null);
+      setMovePreview({ x: beforeX, y: beforeY });
       setSelection({
         type: "element",
-        label: `移动 · ${getElementLabel(target)}`,
+        label: `自由移动 · ${getElementLabel(target)}`,
         selector,
         html: target.outerHTML.slice(0, 2600),
         placement: getElementPlacement(doc, target),
@@ -1412,40 +1591,69 @@ export default function Home() {
     };
 
     const teardownMove = () => {
-      moveSourceSelectorRef.current = null;
-      movePlacementRef.current = null;
+      freeMoveDragRef.current = null;
       setIsMovingElement(false);
-      setMoveIndicator(null);
-      setHoverRect(null);
       doc.body.style.cursor = "grab";
       doc.body.style.userSelect = "";
       doc.body.style.touchAction = "none";
     };
 
     const finishMove = (event: Event) => {
-      if (toolMode !== "move" || !moveSourceSelectorRef.current) return;
+      const drag = freeMoveDragRef.current;
+      if (toolMode !== "move" || !drag) return;
       event.preventDefault();
-      const sourceSelector = moveSourceSelectorRef.current;
-      const placement = movePlacementRef.current;
       teardownMove();
-
-      if (!placement) {
-        showToast("未找到可用的放置位置");
+      drag.element.style.outline = drag.originalOutline;
+      drag.element.style.outlineOffset = drag.originalOutlineOffset;
+      if (
+        Math.abs(drag.x - drag.beforeX) < 0.5 &&
+        Math.abs(drag.y - drag.beforeY) < 0.5
+      ) {
+        setMovePreview(null);
         return;
       }
-      const movedHtml = moveElementInHtml(currentHtml, sourceSelector, placement);
-      if (!movedHtml) {
-        showToast("组件位置没有变化");
-        return;
-      }
-      commitHtml(movedHtml);
-      showToast("组件已移动，可随时撤销");
+      const stagedMove: PendingFreeMove = {
+        selector: drag.selector,
+        label: drag.label,
+        x: drag.x,
+        y: drag.y,
+        originalTranslate: drag.originalTranslate,
+        originalX: drag.originalX,
+        originalY: drag.originalY,
+        originalOutline: drag.originalOutline,
+        originalOutlineOffset: drag.originalOutlineOffset,
+      };
+      stagedMovesRef.current.set(drag.selector, stagedMove);
+      setStagedMoves(Array.from(stagedMovesRef.current.values()));
+      setFreeMoveSteps((steps) => [
+        ...steps,
+        {
+          selector: drag.selector,
+          beforeX: drag.beforeX,
+          beforeY: drag.beforeY,
+          afterX: drag.x,
+          afterY: drag.y,
+        },
+      ]);
+      setMovePreview(null);
+      setSavedMoveHtml(null);
+      setSelection((current) =>
+        current
+          ? {
+              ...current,
+              label: `已暂存 · ${drag.label}`,
+              rect: updateRect(drag.element),
+            }
+          : current,
+      );
     };
 
     const cancelMove = (event: Event) => {
-      if (toolMode !== "move" || !moveSourceSelectorRef.current) return;
+      if (toolMode !== "move" || !freeMoveDragRef.current) return;
       event.preventDefault();
-      teardownMove();
+      abortActiveFreeMove();
+      doc.body.style.cursor = "grab";
+      doc.body.style.userSelect = "";
     };
 
     const handleClick = (event: Event) => {
@@ -1487,7 +1695,7 @@ export default function Home() {
       doc.body.style.userSelect = "";
       doc.body.style.touchAction = "";
     };
-  }, [commitHtml, currentHtml, isWorking, resetIframeInteractionStyles, showToast, toolMode]);
+  }, [abortActiveFreeMove, canvasScale, isWorking, resetIframeInteractionStyles, toolMode]);
 
   const refreshIframeWiring = useCallback(() => {
     iframeCleanupRef.current();
@@ -1544,11 +1752,17 @@ export default function Home() {
 
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
-        if (event.shiftKey) redo();
-        else undo();
+        if (event.shiftKey) {
+          if (!hasStagedMoves) redo();
+        } else if (hasStagedMoves) {
+          undoStagedMove();
+        } else {
+          undo();
+        }
         return;
       }
       if (editingText) return;
+      if (event.key.toLowerCase() === "p") activateTool("interact");
       if (event.key.toLowerCase() === "v") activateTool("select");
       if (event.key.toLowerCase() === "m") activateTool("move");
       if (event.key.toLowerCase() === "r") activateTool("region");
@@ -1563,11 +1777,14 @@ export default function Home() {
     };
     window.addEventListener("keydown", handleKeydown);
     return () => window.removeEventListener("keydown", handleKeydown);
-  }, [activateTool, clearSelection, redo, undo]);
+  }, [activateTool, clearSelection, hasStagedMoves, redo, undo, undoStagedMove]);
 
   const pointFromEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    return {
+      x: (event.clientX - rect.left) / canvasScale,
+      y: (event.clientY - rect.top) / canvasScale,
+    };
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1617,8 +1834,12 @@ export default function Home() {
     const layerBounds = event.currentTarget.getBoundingClientRect();
     const toIframeRect = (rect: Rect) => ({
       ...rect,
-      x: rect.x + layerBounds.left - (iframeBounds?.left ?? layerBounds.left),
-      y: rect.y + layerBounds.top - (iframeBounds?.top ?? layerBounds.top),
+      x:
+        rect.x +
+        (layerBounds.left - (iframeBounds?.left ?? layerBounds.left)) / canvasScale,
+      y:
+        rect.y +
+        (layerBounds.top - (iframeBounds?.top ?? layerBounds.top)) / canvasScale,
     });
     const selectArea = (type: "region" | "drawing", rect: Rect) => {
       const iframeRect = toIframeRect(rect);
@@ -1716,6 +1937,10 @@ export default function Home() {
   };
 
   const sendPrompt = async () => {
+    if (hasStagedMoves) {
+      showToast("请先确认或放弃移动草稿");
+      return;
+    }
     const instruction = prompt.trim();
     if ((!instruction && !attachments.length) || isWorking) return;
     const finalInstruction = instruction || "请参考附件优化当前页面。";
@@ -1868,6 +2093,10 @@ export default function Home() {
   };
 
   const exportHtml = () => {
+    if (hasStagedMoves) {
+      showToast("请先确认或放弃移动草稿，再导出 HTML");
+      return;
+    }
     const blob = new Blob([currentHtml], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -1886,6 +2115,11 @@ export default function Home() {
 
   const applyProjectReplacement = (replacement: ProjectReplacement) => {
     documentRevisionRef.current += 1;
+    stagedMovesRef.current.clear();
+    setStagedMoves([]);
+    setFreeMoveSteps([]);
+    setMovePreview(null);
+    setSavedMoveHtml(null);
     setHistory([replacement.html]);
     setHistoryIndex(0);
     setCodeDraft(replacement.html);
@@ -1957,6 +2191,11 @@ export default function Home() {
 
   const resetProject = () => {
     documentRevisionRef.current += 1;
+    stagedMovesRef.current.clear();
+    setStagedMoves([]);
+    setFreeMoveSteps([]);
+    setMovePreview(null);
+    setSavedMoveHtml(null);
     setHistory([projectBaseline]);
     setHistoryIndex(0);
     setCodeDraft(projectBaseline);
@@ -2015,8 +2254,8 @@ export default function Home() {
 
         <div className="topbar-actions">
           <div className="history-actions">
-            <button onClick={undo} disabled={!canUndo} aria-label="撤销" title="撤销 · ⌘Z" type="button"><Undo2 size={17} /></button>
-            <button onClick={redo} disabled={!canRedo} aria-label="重做" title="重做 · ⇧⌘Z" type="button"><Redo2 size={17} /></button>
+            <button onClick={hasStagedMoves ? undoStagedMove : undo} disabled={hasStagedMoves ? !freeMoveSteps.length : !canUndo} aria-label="撤销" title="撤销 · ⌘Z" type="button"><Undo2 size={17} /></button>
+            <button onClick={redo} disabled={hasStagedMoves || !canRedo} aria-label="重做" title="重做 · ⇧⌘Z" type="button"><Redo2 size={17} /></button>
           </div>
           <button className="ghost-action hide-on-small" onClick={resetProject} type="button"><RotateCcw size={15} />重置</button>
           <button className="ghost-action" onClick={openSettings} type="button">
@@ -2038,6 +2277,7 @@ export default function Home() {
       <div className={`workspace ${panelOpen ? "" : "panel-collapsed"}`}>
         <aside className="tool-rail" aria-label="画布工具">
           <div className="tool-group">
+            <ToolButton active={toolMode === "interact"} label="操作页面" shortcut="P" onClick={() => activateTool("interact")}><Hand size={18} /></ToolButton>
             <ToolButton active={toolMode === "select"} label="选择元素" shortcut="V" onClick={() => activateTool("select")}><MousePointer2 size={19} /></ToolButton>
             <ToolButton active={toolMode === "move"} disabled={isWorking || hasPendingCodeDraft} label="移动组件" shortcut="M" onClick={() => activateTool("move")}><Move size={18} /></ToolButton>
             <ToolButton active={toolMode === "region"} label="圈选区域" shortcut="R" onClick={() => activateTool("region")}><BoxSelect size={19} /></ToolButton>
@@ -2058,6 +2298,7 @@ export default function Home() {
             <div className={`canvas-tool-state state-${toolMode}`}>
               <span className="tool-state-icon">
                 {toolMode === "select" && <MousePointer2 size={14} />}
+                {toolMode === "interact" && <Hand size={14} />}
                 {toolMode === "move" && <Move size={14} />}
                 {toolMode === "region" && <BoxSelect size={14} />}
                 {toolMode === "draw" && <Pencil size={14} />}
@@ -2065,13 +2306,21 @@ export default function Home() {
               <span>
                 <strong>
                   {toolMode === "select" && "智能选择"}
-                  {toolMode === "move" && (isMovingElement ? "正在移动" : "移动组件")}
+                  {toolMode === "interact" && "操作页面"}
+                  {toolMode === "move" && (isMovingElement ? "自由移动中" : hasStagedMoves ? "继续编排" : "自由移动")}
                   {toolMode === "region" && "区域定位"}
                   {toolMode === "draw" && "手绘意图"}
                 </strong>
                 <small>
                   {toolMode === "select" && "DOM 目标"}
-                  {toolMode === "move" && (isMovingElement ? "寻找落点" : "直接重排")}
+                  {toolMode === "interact" && "点击与输入"}
+                  {toolMode === "move" && (
+                    isMovingElement && movePreview
+                      ? `X ${Math.round(movePreview.x)} · Y ${Math.round(movePreview.y)}`
+                      : hasStagedMoves
+                        ? `${stagedMoves.length} 个组件待确认`
+                        : "PPT 式定位"
+                  )}
                   {toolMode === "region" && "范围上下文"}
                   {toolMode === "draw" && "视觉上下文"}
                 </small>
@@ -2083,11 +2332,14 @@ export default function Home() {
                 <button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="平板预览" type="button"><Tablet size={16} /></button>
                 <button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="手机预览" type="button"><Smartphone size={16} /></button>
               </div>
-              <span className="canvas-size">{deviceSize.width} × {deviceSize.height}</span>
+              <span className="canvas-size">
+                {deviceSize.width} × {deviceSize.height}
+                <em>{canvasScalePercent}%</em>
+              </span>
             </div>
             <div className="mobile-history-actions" aria-label="版本操作">
-              <button onClick={undo} disabled={!canUndo} aria-label="撤销" type="button"><Undo2 size={15} /></button>
-              <button onClick={redo} disabled={!canRedo} aria-label="重做" type="button"><Redo2 size={15} /></button>
+              <button onClick={hasStagedMoves ? undoStagedMove : undo} disabled={hasStagedMoves ? !freeMoveSteps.length : !canUndo} aria-label="撤销" type="button"><Undo2 size={15} /></button>
+              <button onClick={redo} disabled={hasStagedMoves || !canRedo} aria-label="重做" type="button"><Redo2 size={15} /></button>
             </div>
             <div className={`canvas-context-state ${selection ? "active" : ""}`}>
               <Sparkles size={13} />
@@ -2096,59 +2348,94 @@ export default function Home() {
           </div>
 
           <div
+            ref={canvasScrollerRef}
             className="canvas-scroller"
             onDragOver={(event) => event.preventDefault()}
             onDrop={handleDrop}
           >
             <div
-              className={`device-frame tool-${toolMode}`}
-              style={{ width: deviceSize.width, height: deviceSize.height }}
+              className="device-stage"
+              style={{
+                width: deviceSize.width * canvasScale,
+                height: deviceSize.height * canvasScale,
+              }}
             >
-              <iframe
-                ref={iframeRef}
-                srcDoc={previewHtml}
-                title="HTML 页面预览"
-                sandbox="allow-same-origin"
-                referrerPolicy="no-referrer"
-                onLoad={refreshIframeWiring}
-              />
               <div
-                className="interaction-layer"
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerUp}
-                onPointerCancel={handlePointerUp}
+                className={`device-frame tool-${toolMode}`}
+                style={{
+                  width: deviceSize.width,
+                  height: deviceSize.height,
+                  transform: `scale(${canvasScale})`,
+                }}
               >
-                {drawPoints.length > 1 && (
-                  <svg className="draw-overlay" aria-hidden="true">
-                    <path d={toSvgPath(drawPoints)} />
-                  </svg>
+                <iframe
+                  ref={iframeRef}
+                  srcDoc={previewHtml}
+                  title="HTML 页面预览"
+                  sandbox="allow-same-origin"
+                  referrerPolicy="no-referrer"
+                  onLoad={refreshIframeWiring}
+                />
+                <div
+                  className="interaction-layer"
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
+                >
+                  {drawPoints.length > 1 && (
+                    <svg className="draw-overlay" aria-hidden="true">
+                      <path d={toSvgPath(drawPoints)} />
+                    </svg>
+                  )}
+                </div>
+
+                {hoverRect && (toolMode === "select" || toolMode === "move") && !selection && (
+                  <div className="hover-outline" style={{ left: hoverRect.x, top: hoverRect.y, width: hoverRect.width, height: hoverRect.height }} />
+                )}
+                {selection?.type === "element" && !isMovingElement && (
+                  <div className={`selection-outline ${isMovingElement ? "moving" : ""}`} style={{ left: selection.rect.x, top: selection.rect.y, width: selection.rect.width, height: selection.rect.height }}>
+                    <span>{selection.label}</span>
+                  </div>
+                )}
+                {regionRect && (
+                  <div className="region-outline" style={{ left: regionRect.x, top: regionRect.y, width: regionRect.width, height: regionRect.height }}>
+                    {selection?.type === "region" && <span>编辑这个区域</span>}
+                  </div>
                 )}
               </div>
-
-              {hoverRect && (toolMode === "select" || toolMode === "move") && !selection && (
-                <div className="hover-outline" style={{ left: hoverRect.x, top: hoverRect.y, width: hoverRect.width, height: hoverRect.height }} />
-              )}
-              {selection?.type === "element" && (
-                <div className={`selection-outline ${isMovingElement ? "moving" : ""}`} style={{ left: selection.rect.x, top: selection.rect.y, width: selection.rect.width, height: selection.rect.height }}>
-                  <span>{selection.label}</span>
-                </div>
-              )}
-              {regionRect && (
-                <div className="region-outline" style={{ left: regionRect.x, top: regionRect.y, width: regionRect.width, height: regionRect.height }}>
-                  {selection?.type === "region" && <span>编辑这个区域</span>}
-                </div>
-              )}
-              {moveIndicator && toolMode === "move" && (
-                <div
-                  className="move-drop-indicator"
-                  style={{ left: moveIndicator.x, top: moveIndicator.y, width: moveIndicator.width, height: moveIndicator.height }}
-                >
-                  <span>放到这里</span>
-                </div>
-              )}
             </div>
           </div>
+
+          {hasStagedMoves && (
+            <div className="move-batch-bar" role="status" aria-live="polite">
+              <div className="move-batch-summary">
+                <span className="move-batch-icon"><Move size={15} /></span>
+                <span>
+                  <strong>移动草稿</strong>
+                  <small>{stagedMoves.length} 个组件 · {freeMoveSteps.length} 次调整</small>
+                </span>
+              </div>
+              <div className="move-batch-actions">
+                <button onClick={undoStagedMove} disabled={!freeMoveSteps.length} type="button"><Undo2 size={14} />撤销上一步</button>
+                <button onClick={discardStagedMoves} type="button"><X size={14} />放弃</button>
+                <button className="confirm" onClick={confirmStagedMoves} type="button"><Check size={14} />确认并渲染</button>
+              </div>
+            </div>
+          )}
+
+          {!hasStagedMoves && savedMoveHtml === currentHtml && (
+            <div className="move-batch-bar saved" role="status">
+              <div className="move-batch-summary">
+                <span className="move-batch-icon"><Check size={15} /></span>
+                <span><strong>位置已渲染</strong><small>已写入 HTML 和版本历史</small></span>
+              </div>
+              <div className="move-batch-actions">
+                <button onClick={undoSavedMove} type="button"><Undo2 size={14} />撤销移动</button>
+                <button onClick={() => setSavedMoveHtml(null)} aria-label="关闭移动提示" type="button"><X size={14} /></button>
+              </div>
+            </div>
+          )}
 
           <div className="canvas-statusbar">
             <span><span className="status-dot" />{isWorking ? "Agent 正在生成" : "画布已同步"}</span>
@@ -2247,7 +2534,7 @@ export default function Home() {
                       <button onClick={() => fileInputRef.current?.click()} aria-label="添加文档" title="添加文本、Markdown、HTML 或 CSS" type="button"><Paperclip size={17} /></button>
                       <button onClick={() => imageInputRef.current?.click()} aria-label="添加参考图" title="添加参考图" type="button"><ImageIcon size={17} /></button>
                     </div>
-                    <button className="send-button" onClick={() => void sendPrompt()} disabled={isWorking || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
+                    <button className="send-button" onClick={() => void sendPrompt()} disabled={isWorking || hasStagedMoves || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
                       {isWorking ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
                     </button>
                   </div>
@@ -2276,10 +2563,11 @@ export default function Home() {
                 }}
                 spellCheck={false}
                 aria-label="HTML 源码"
+                disabled={hasStagedMoves}
               />
               <div className="code-footer">
                 <button className="ghost-code" onClick={() => setCodeDraft(currentHtml)} type="button"><Trash2 size={14} />放弃修改</button>
-                <button className="apply-code" onClick={() => { commitHtml(codeDraft); showToast("代码已应用"); }} disabled={codeDraft === currentHtml} type="button"><Check size={14} />应用到画布</button>
+                <button className="apply-code" onClick={() => { if (hasStagedMoves) { showToast("请先确认或放弃移动草稿"); return; } commitHtml(codeDraft); showToast("代码已应用"); }} disabled={hasStagedMoves || codeDraft === currentHtml} type="button"><Check size={14} />应用到画布</button>
               </div>
             </div>
           )}
