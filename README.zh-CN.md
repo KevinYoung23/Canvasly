@@ -244,6 +244,20 @@ npm test
 node --check tools/copilot-bridge.mjs
 ```
 
+### 端到端测试
+
+运行 E2E 前请先启动 Docker 应用。浏览器测试通过 `playwright-core` 复用本机已安装的 Microsoft Edge、Google Chrome 或 Chromium，不会额外下载浏览器。
+
+```bash
+./install.sh
+npm run test:api       # 12 个确定性 API 契约 case
+npm run test:browser   # 10 个确定性 UI 与工作流 case
+npm run test:model     # 14 个真实本地 gpt-5.5 case，含一个浏览器完整链路
+npm run test:e2e       # 依次运行以上三套测试
+```
+
+`test:model` 默认连接 `http://host.docker.internal:4141/v1` 的 Responses-compatible 服务并使用 `gpt-5.5`。可通过 `CANVASLY_MODEL_ENDPOINT` 与 `CANVASLY_MODEL` 覆盖。测试报告写入 `.sites-runtime/test-reports/local-model.json`。
+
 macOS 上 `npm test` 需要 GNU `timeout`；等价的底层验证命令为：
 
 ```bash

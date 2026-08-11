@@ -242,6 +242,20 @@ npm test
 node --check tools/copilot-bridge.mjs
 ```
 
+### End-to-end suites
+
+Start the Docker app before running E2E tests. Browser tests use an installed Microsoft Edge, Google Chrome, or Chromium through `playwright-core` and do not download another browser.
+
+```bash
+./install.sh
+npm run test:api       # 12 deterministic API contract cases
+npm run test:browser   # 10 deterministic UI and workflow cases
+npm run test:model     # 14 real local gpt-5.5 cases, including one browser flow
+npm run test:e2e       # all three suites in sequence
+```
+
+`test:model` expects the Responses-compatible endpoint at `http://host.docker.internal:4141/v1` with model `gpt-5.5`. Override it with `CANVASLY_MODEL_ENDPOINT` and `CANVASLY_MODEL`. The run report is written to `.sites-runtime/test-reports/local-model.json`.
+
 On macOS, `npm test` requires GNU `timeout`; the equivalent underlying validation is:
 
 ```bash
