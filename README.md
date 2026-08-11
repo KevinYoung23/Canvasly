@@ -77,10 +77,12 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 | Area | Capabilities |
 | --- | --- |
 | Collaboration | Cowork / Chat modes, independent histories, Agent status |
+| Execution reports | Applied updates, partial or blocked reasons, selectable recovery options |
 | Follow-ups | Editable composer while running, Steer, Queue, removable jobs |
 | Prompt workflow | `↑` / `↓` terminal-style history per mode, unsent draft restore |
 | Visual targeting | DOM selection, region selection, freehand annotation |
 | Direct manipulation | Native page interaction, multi-component free movement, batch confirmation |
+| Safe navigation | Working in-page anchors and external links, diagnostics for inert controls |
 | Canvas | Auto-fit, pointer-centered local zoom, desktop/tablet/mobile sizes |
 | Inputs | Images, HTML, CSS, Markdown, JSON, source code, text references |
 | Recovery | Up to 30 in-session versions, undo, redo, reset, batch rollback |

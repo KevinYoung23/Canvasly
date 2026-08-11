@@ -1,9 +1,11 @@
 "use client";
 
 import {
+  ArrowRight,
   BoxSelect,
   Check,
   ChevronDown,
+  CircleAlert,
   Code2,
   Copy,
   Download,
@@ -147,6 +149,27 @@ type Attachment = {
   sizeLabel: string;
 };
 
+type CoworkStatus = "completed" | "partial" | "blocked";
+
+type CoworkSuggestion = {
+  label: string;
+  prompt: string;
+  description?: string;
+};
+
+type CoworkReport = {
+  status: CoworkStatus;
+  updates: string[];
+  issues: string[];
+  suggestions: CoworkSuggestion[];
+};
+
+type CoworkResult = CoworkReport & {
+  html: string;
+  summary: string;
+  insertionApplied?: boolean;
+};
+
 type ChatMessage = {
   id: string;
   role: "assistant" | "user";
@@ -155,6 +178,7 @@ type ChatMessage = {
   error?: boolean;
   jobId?: string;
   queueState?: "steer" | "queued" | "running";
+  report?: CoworkReport;
 };
 
 type AgentJobPriority = "normal" | "steer" | "queued";
@@ -224,6 +248,36 @@ const CHAT_SUGGESTIONS = [
   "给我三个可选的优化方向",
 ];
 
+function failureReport(message: string, instruction: string): CoworkReport {
+  const retry = {
+    label: "重试原任务",
+    description: "保留当前画布，再执行一次相同要求。",
+    prompt: instruction,
+  };
+  const narrowScope = {
+    label: "缩小修改范围",
+    description: "先完成一个最明确的局部改动，降低生成复杂度。",
+    prompt: `请把下面任务拆成一步，只完成其中最明确、最局部的修改：\n${instruction}`,
+  };
+  const chooseTarget = {
+    label: "重新选择目标",
+    description: "先在画布中选择具体容器或元素，再运行这条要求。",
+    prompt: instruction,
+  };
+
+  return {
+    status: "blocked",
+    updates: [],
+    issues: [message],
+    suggestions:
+      /位置|边界|容器|圈选/.test(message)
+        ? [chooseTarget, narrowScope]
+        : /超时|timeout/i.test(message)
+          ? [retry, narrowScope]
+          : [retry, narrowScope],
+  };
+}
+
 const initialProvider = PROVIDERS[0];
 const EDIT_TARGET_ATTRIBUTE = "data-canvasly-edit-target";
 const PLACEMENT_ANCHOR_ATTRIBUTE = "data-canvasly-placement-anchor";
@@ -267,21 +321,51 @@ function readFileAsText(file: File) {
 }
 
 function safePreviewHtml(source: string) {
-  const noScripts = source
+  const cspContent = "default-src 'none'; script-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:; media-src data: https:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';";
+  const previewStyleContent = "html{height:100%!important;overflow:hidden!important}body{height:100%!important;overflow:auto!important;scroll-behavior:auto!important}";
+  const fallback = source
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, "");
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:; media-src data: https:;">`;
-  if (/<head\b[^>]*>/i.test(noScripts)) {
-    return noScripts.replace(/<head\b[^>]*>/i, (head) => `${head}${csp}`);
+  const csp = `<meta http-equiv="Content-Security-Policy" content="${cspContent}">`;
+  const previewStyle = `<style data-canvasly-preview>${previewStyleContent}</style>`;
+  if (typeof DOMParser === "undefined") {
+    if (/<head\b[^>]*>/i.test(fallback)) {
+      return fallback.replace(/<head\b[^>]*>/i, (head) => `${head}${csp}${previewStyle}`);
+    }
+    return `<head>${csp}${previewStyle}</head>${fallback}`;
   }
-  if (/<html\b[^>]*>/i.test(noScripts)) {
-    return noScripts.replace(/<html\b[^>]*>/i, (html) => `${html}<head>${csp}</head>`);
-  }
-  const doctype = noScripts.match(/^\s*<!doctype\b[^>]*>/i)?.[0];
-  if (doctype) {
-    return noScripts.replace(doctype, `${doctype}\n<head>${csp}</head>`);
-  }
-  return `<head>${csp}</head>${noScripts}`;
+
+  const doc = new DOMParser().parseFromString(fallback, "text/html");
+  doc.querySelectorAll("script, iframe, object, embed, base").forEach((element) => element.remove());
+  doc.querySelectorAll("meta[http-equiv]").forEach((element) => {
+    const directive = element.getAttribute("http-equiv")?.toLowerCase();
+    if (directive === "refresh" || directive === "content-security-policy") {
+      element.remove();
+    }
+  });
+  doc.querySelectorAll("*").forEach((element) => {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      if (
+        name.startsWith("on") ||
+        name === "srcdoc" ||
+        (["href", "src", "action", "formaction", "xlink:href"].includes(name) &&
+          /^javascript:/i.test(value))
+      ) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  });
+  const policy = doc.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content = cspContent;
+  doc.head.prepend(policy);
+  const previewStyles = doc.createElement("style");
+  previewStyles.setAttribute("data-canvasly-preview", "");
+  previewStyles.textContent = previewStyleContent;
+  doc.head.append(previewStyles);
+  return `<!doctype html>\n${doc.documentElement.outerHTML}`;
 }
 
 function getElementLabel(element: Element) {
@@ -1152,7 +1236,57 @@ function applyDemoEdit(
   return {
     html: serializeDocument(doc),
     summary: changes.join("；"),
+    updates: changes,
   };
+}
+
+function CoworkReportDetails({
+  report,
+  onChoose,
+}: {
+  report: CoworkReport;
+  onChoose: (suggestion: CoworkSuggestion) => void;
+}) {
+  if (!report.updates.length && !report.issues.length && !report.suggestions.length) {
+    return null;
+  }
+
+  return (
+    <div className={`cowork-report ${report.status}`} aria-label="Agent 执行报告">
+      {!!report.updates.length && (
+        <section>
+          <strong><Check size={12} />已更新</strong>
+          <ul>{report.updates.map((item) => <li key={item}>{item}</li>)}</ul>
+        </section>
+      )}
+      {!!report.issues.length && (
+        <section className="cowork-report-issues">
+          <strong><CircleAlert size={12} />限制与冲突</strong>
+          <ul>{report.issues.map((item) => <li key={item}>{item}</li>)}</ul>
+        </section>
+      )}
+      {!!report.suggestions.length && (
+        <section className="cowork-report-options">
+          <strong><Sparkles size={12} />可选方案</strong>
+          <div>
+            {report.suggestions.map((suggestion) => (
+              <button
+                key={`${suggestion.label}-${suggestion.prompt}`}
+                onClick={() => onChoose(suggestion)}
+                type="button"
+              >
+                <span>
+                  <b>{suggestion.label}</b>
+                  {suggestion.description && <small>{suggestion.description}</small>}
+                </span>
+                <ArrowRight size={12} />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
 }
 
 function ToolButton({
@@ -1263,6 +1397,7 @@ export default function Home() {
   });
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
+  const navigationIssueRef = useRef({ key: "", timestamp: 0 });
 
   const currentHtml = history[historyIndex];
   const previewHtml = useMemo(() => safePreviewHtml(currentHtml), [currentHtml]);
@@ -1311,6 +1446,54 @@ export default function Home() {
     setToast(message);
     window.setTimeout(() => setToast(null), 2600);
   }, []);
+
+  const chooseCoworkSuggestion = useCallback((suggestion: CoworkSuggestion) => {
+    setCollaborationMode("cowork");
+    setPanelOpen(true);
+    setPanelTab("chat");
+    setPrompt(suggestion.prompt);
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    window.setTimeout(() => {
+      promptRef.current?.focus();
+      promptRef.current?.setSelectionRange(
+        suggestion.prompt.length,
+        suggestion.prompt.length,
+      );
+    }, 60);
+  }, []);
+
+  const reportNavigationIssue = useCallback((
+    summary: string,
+    issue: string,
+    suggestions: CoworkSuggestion[],
+  ) => {
+    const key = `${summary}:${issue}`;
+    const now = Date.now();
+    if (
+      navigationIssueRef.current.key === key &&
+      now - navigationIssueRef.current.timestamp < 1_500
+    ) {
+      return;
+    }
+    navigationIssueRef.current = { key, timestamp: now };
+    appendModeMessage("cowork", {
+      id: makeId("navigation-blocked"),
+      role: "assistant",
+      text: "导航需要补充配置",
+      detail: summary,
+      report: {
+        status: "blocked",
+        updates: [],
+        issues: [issue],
+        suggestions,
+      },
+    });
+    setCollaborationMode("cowork");
+    setPanelOpen(true);
+    setPanelTab("chat");
+    showToast(summary);
+  }, [appendModeMessage, showToast]);
 
   const commitHtml = useCallback(
     (nextHtml: string) => {
@@ -1877,12 +2060,132 @@ export default function Home() {
     };
 
     const handleClick = (event: Event) => {
-      if (toolMode !== "select" || !ElementCtor || !(event.target instanceof ElementCtor)) {
+      if (!ElementCtor || !(event.target instanceof ElementCtor)) {
         return;
       }
+      const clickedElement = event.target;
+      if (toolMode === "interact") {
+        const anchor = clickedElement.closest<HTMLAnchorElement>("a[href]");
+        const button = clickedElement.closest<HTMLElement>("button, [role='button']");
+        if (!anchor && !button) return;
+
+        const control = anchor ?? button;
+        const controlName =
+          control.getAttribute("aria-label") ||
+          control.textContent?.replace(/\s+/g, " ").trim().slice(0, 52) ||
+          "这个控件";
+        const form = button?.closest("form");
+        const destination = (
+          anchor?.getAttribute("href") ||
+          button?.getAttribute("data-href") ||
+          button?.getAttribute("data-url") ||
+          button?.getAttribute("data-target") ||
+          button?.getAttribute("formaction") ||
+          form?.getAttribute("action") ||
+          ""
+        ).trim();
+        const navigationSuggestions: CoworkSuggestion[] = [
+          {
+            label: "改为页内导航",
+            description: "创建真实目标区块，并使用 #id 语义链接。",
+            prompt: `把“${controlName}”改成可用的页内导航。使用语义化 <a href="#目标-id">，并为对应内容区添加同名 id；不要使用 onclick 或脚本。`,
+          },
+          {
+            label: "连接真实页面",
+            description: "提供完整 HTTPS 地址后再配置跳转。",
+            prompt: `把“${controlName}”改成真实页面链接。我会补充完整 HTTPS 目标地址；不要使用 # 占位或相对页面路径。`,
+          },
+        ];
+
+        if (!destination || destination === "#") {
+          event.preventDefault();
+          event.stopPropagation();
+          reportNavigationIssue(
+            `“${controlName}”尚未配置跳转目标`,
+            anchor
+              ? "当前链接仍是 # 占位符，没有对应的页面或区块。"
+              : "当前按钮没有 href、data-href、表单 action；预览出于安全原因也不会执行 onclick 脚本。",
+            navigationSuggestions,
+          );
+          return;
+        }
+
+        if (destination.startsWith("#")) {
+          event.preventDefault();
+          event.stopPropagation();
+          let targetId = destination.slice(1);
+          try {
+            targetId = decodeURIComponent(targetId);
+          } catch {
+            // Keep the literal target so the missing-target report remains useful.
+          }
+          const destinationElement = doc.getElementById(targetId);
+          if (!destinationElement) {
+            reportNavigationIssue(
+              `找不到“${controlName}”的目标区块`,
+              `链接指向 ${destination}，但当前 HTML 中没有 id="${targetId}" 的元素。`,
+              navigationSuggestions,
+            );
+            return;
+          }
+          const scroller = doc.body;
+          const targetTop = destinationElement.getBoundingClientRect().top + scroller.scrollTop;
+          scroller.scrollTop = targetTop;
+          showToast(`已跳转到“${controlName}”`);
+          return;
+        }
+
+        const hasExplicitProtocol = /^[a-z][a-z\d+.-]*:/i.test(destination);
+        if (!hasExplicitProtocol && !destination.startsWith("//")) {
+          event.preventDefault();
+          event.stopPropagation();
+          reportNavigationIssue(
+            `预览无法打开相对页面“${destination}”`,
+            "Canvasly 当前编辑的是单个独立 HTML，未加载该相对路径对应的第二个页面。",
+            navigationSuggestions,
+          );
+          return;
+        }
+
+        let destinationUrl: URL;
+        try {
+          destinationUrl = new URL(destination, doc.baseURI);
+        } catch {
+          event.preventDefault();
+          reportNavigationIssue(
+            `“${controlName}”的地址无效`,
+            `无法解析导航地址：${destination}`,
+            navigationSuggestions,
+          );
+          return;
+        }
+        if (!["http:", "https:", "mailto:", "tel:"].includes(destinationUrl.protocol)) {
+          event.preventDefault();
+          event.stopPropagation();
+          reportNavigationIssue(
+            `“${controlName}”使用了不受支持的协议`,
+            `预览不会执行 ${destinationUrl.protocol} 链接；脚本和不安全协议已被禁用。`,
+            navigationSuggestions,
+          );
+          return;
+        }
+
+        if (anchor) {
+          anchor.target = "_blank";
+          anchor.rel = "noopener noreferrer";
+          showToast(`已打开“${controlName}”`);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        doc.defaultView?.open(destinationUrl.href, "_blank", "noopener,noreferrer");
+        showToast(`已打开“${controlName}”`);
+        return;
+      }
+      if (toolMode !== "select") return;
       event.preventDefault();
       event.stopPropagation();
-      const target = event.target;
+      const target = clickedElement;
       const rect = updateRect(target);
       setSelection({
         type: "element",
@@ -1920,7 +2223,7 @@ export default function Home() {
       doc.body.style.userSelect = "";
       doc.body.style.touchAction = "";
     };
-  }, [abortActiveFreeMove, canvasScale, isWorking, resetIframeInteractionStyles, setCanvasScaleAroundPoint, toolMode]);
+  }, [abortActiveFreeMove, canvasScale, isWorking, reportNavigationIssue, resetIframeInteractionStyles, setCanvasScaleAroundPoint, showToast, toolMode]);
 
   const refreshIframeWiring = useCallback(() => {
     iframeCleanupRef.current();
@@ -2227,7 +2530,7 @@ export default function Home() {
         return;
       }
 
-      let result: { html: string; summary: string; insertionApplied?: boolean };
+      let result: CoworkResult;
       if (prepared.insertionRequested && !prepared.insertionExpected) {
         throw new Error("无法确定这个位置的安全插入边界。请缩小圈选范围，或直接选中目标容器后重试。");
       }
@@ -2236,7 +2539,13 @@ export default function Home() {
       }
       if (job.config.protocol === "demo") {
         await new Promise((resolve) => window.setTimeout(resolve, 620));
-        result = applyDemoEdit(sourceHtml, finalInstruction, selectedContext);
+        const demoResult = applyDemoEdit(sourceHtml, finalInstruction, selectedContext);
+        result = {
+          status: "completed",
+          ...demoResult,
+          issues: [],
+          suggestions: [],
+        };
       } else {
         const requestTransform = async (requestInstruction: string) => {
           const response = await fetch("/api/transform", {
@@ -2255,9 +2564,32 @@ export default function Home() {
             html?: string;
             summary?: string;
             error?: string;
+            status?: CoworkStatus;
+            updates?: string[];
+            issues?: string[];
+            suggestions?: CoworkSuggestion[];
           };
-          if (!response.ok || !payload.html) {
+          if (!response.ok) {
             throw new Error(payload.error || "模型没有返回可用的 HTML");
+          }
+          const status = payload.status ?? "completed";
+          const summary = payload.summary || "已根据描述更新页面";
+          const report = {
+            status,
+            summary,
+            updates: Array.isArray(payload.updates) && payload.updates.length
+              ? payload.updates
+              : status === "blocked"
+                ? []
+                : [summary],
+            issues: Array.isArray(payload.issues) ? payload.issues : [],
+            suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
+          };
+          if (status === "blocked") {
+            return { ...report, html: "" } as CoworkResult;
+          }
+          if (!payload.html) {
+            throw new Error("模型没有返回可用的 HTML");
           }
           const cleaned = cleanTransformHtml(
             payload.html,
@@ -2266,12 +2598,23 @@ export default function Home() {
             prepared.selection?.placement,
           );
           return {
+            ...report,
             ...cleaned,
-            summary: payload.summary || "已根据描述更新页面",
-          };
+          } as CoworkResult;
         };
 
         result = await requestTransform(finalInstruction);
+        if (result.status === "blocked") {
+          appendModeMessage(job.mode, {
+            id: makeId("assistant-blocked"),
+            role: "assistant",
+            text: "需要你确认下一步",
+            detail: result.summary,
+            report: result,
+          });
+          showToast("当前任务需要选择解决方案");
+          return;
+        }
         if (
           htmlIsUnchanged(result.html, prepared.baselineHtml) ||
           (prepared.insertionExpected && !result.insertionApplied)
@@ -2284,6 +2627,17 @@ export default function Home() {
           result = await requestTransform(
             `${finalInstruction}\n\n${retryGuidance}`,
           );
+        }
+        if (result.status === "blocked") {
+          appendModeMessage(job.mode, {
+            id: makeId("assistant-blocked"),
+            role: "assistant",
+            text: "需要你确认下一步",
+            detail: result.summary,
+            report: result,
+          });
+          showToast("当前任务需要选择解决方案");
+          return;
         }
         if (prepared.insertionExpected && !result.insertionApplied) {
           throw new Error("模型没有把组件放入圈选位置，已停止应用以避免出现在错误区域。");
@@ -2300,18 +2654,20 @@ export default function Home() {
       appendModeMessage(job.mode, {
         id: makeId("assistant"),
         role: "assistant",
-        text: "修改完成",
+        text: result.status === "partial" ? "已完成可执行部分" : "更新已完成",
         detail: result.summary,
+        report: result,
       });
-      showToast("页面已更新");
+      showToast(result.status === "partial" ? "已应用部分更新" : "页面已更新");
     } catch (error) {
       const message = error instanceof Error ? error.message : "请求失败，请检查模型连接";
       appendModeMessage(job.mode, {
         id: makeId("error"),
         role: "assistant",
         text: job.mode === "cowork" ? "这次没有应用修改" : "这次没有完成回复",
-        detail: message,
+        detail: job.mode === "cowork" ? "画布保持原样" : message,
         error: true,
+        report: job.mode === "cowork" ? failureReport(message, finalInstruction) : undefined,
       });
     } finally {
       updateModeMessage(job.mode, job.messageId, {
@@ -2814,7 +3170,7 @@ export default function Home() {
                   ref={iframeRef}
                   srcDoc={previewHtml}
                   title="HTML 页面预览"
-                  sandbox="allow-same-origin"
+                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                   referrerPolicy="no-referrer"
                   onLoad={refreshIframeWiring}
                 />
@@ -2941,7 +3297,13 @@ export default function Home() {
                       <div className="message-bubble">
                         <p>{message.text}</p>
                         {message.detail && <span>{message.detail}</span>}
-                        {collaborationMode === "cowork" && message.role === "assistant" && !message.id.endsWith("welcome") && !message.error && (
+                        {message.report && (
+                          <CoworkReportDetails
+                            report={message.report}
+                            onChoose={chooseCoworkSuggestion}
+                          />
+                        )}
+                        {collaborationMode === "cowork" && message.role === "assistant" && !message.id.endsWith("welcome") && !message.error && message.report?.status !== "blocked" && (
                           <button onClick={undo} disabled={!canUndo} type="button"><Undo2 size={12} />撤销这次修改</button>
                         )}
                       </div>

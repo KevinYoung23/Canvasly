@@ -139,6 +139,7 @@ export const STARTER_HTML = String.raw`<!doctype html>
     <title>Northstar — Plan less. Go further.</title>
     <style>
       * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
       :root {
         --ink: #1d1b20;
         --muted: #77727f;
@@ -175,7 +176,7 @@ export const STARTER_HTML = String.raw`<!doctype html>
       .nav-links a { color: inherit; text-decoration: none; }
       .nav-cta {
         border: 1px solid #d9d4cb; border-radius: 999px; padding: 10px 15px;
-        background: rgba(255,255,255,.65); color: var(--ink); font-weight: 650;
+        background: rgba(255,255,255,.65); color: var(--ink); font-weight: 650; text-decoration: none;
       }
       .hero {
         max-width: 1120px;
@@ -201,9 +202,9 @@ export const STARTER_HTML = String.raw`<!doctype html>
       .actions { display: flex; align-items: center; gap: 14px; margin-top: 28px; }
       .primary-btn {
         border: 0; border-radius: 999px; padding: 14px 20px; background: var(--ink); color: white;
-        font-weight: 700; box-shadow: 0 10px 28px rgba(29,27,32,.16);
+        font-weight: 700; box-shadow: 0 10px 28px rgba(29,27,32,.16); text-decoration: none;
       }
-      .secondary-btn { color: #5c5761; font-size: 13px; font-weight: 650; }
+      .secondary-btn { color: #5c5761; font-size: 13px; font-weight: 650; text-decoration: none; }
       .visual { position: relative; min-height: 465px; }
       .orb { position: absolute; border-radius: 50%; filter: blur(.2px); }
       .orb-a { width: 270px; height: 270px; background: #ded3ff; top: 14px; right: 18px; }
@@ -257,8 +258,8 @@ export const STARTER_HTML = String.raw`<!doctype html>
       <nav class="nav">
         <div class="brand"><span class="brand-mark"></span>Northstar</div>
         <div class="nav-links">
-          <a href="#">Destinations</a><a href="#">Stories</a><a href="#">About</a>
-          <button class="nav-cta">Build a trip</button>
+          <a href="#destinations">Destinations</a><a href="#stories">Stories</a><a href="#about">About</a>
+          <a class="nav-cta" href="#destinations">Build a trip</a>
         </div>
       </nav>
       <main class="hero">
@@ -267,11 +268,11 @@ export const STARTER_HTML = String.raw`<!doctype html>
           <h1>Plan less.<br />Go <em>further.</em></h1>
           <p class="lead">Tell us what moves you. Northstar turns scattered ideas into a personal route—beautifully paced, easy to share, and ready when you are.</p>
           <div class="actions">
-            <button class="primary-btn">Start planning →</button>
-            <span class="secondary-btn">See a sample trip</span>
+            <a class="primary-btn" href="#destinations">Start planning →</a>
+            <a class="secondary-btn" href="#stories">See a sample trip</a>
           </div>
         </section>
-        <section class="visual">
+        <section class="visual" id="destinations">
           <div class="orb orb-a"></div><div class="orb orb-b"></div>
           <article class="route-card">
             <div class="route-top"><span class="route-label">Your next escape</span><div class="avatar-stack"><span class="avatar"></span><span class="avatar"></span><span class="avatar"></span></div></div>
@@ -281,10 +282,10 @@ export const STARTER_HTML = String.raw`<!doctype html>
           </article>
         </section>
       </main>
-      <section class="proof">
+      <section class="proof" id="stories">
         <article class="proof-card"><span class="proof-num">01</span><div><strong>Built around you</strong><p>Not a list of places—a route shaped around your pace.</p></div></article>
         <article class="proof-card"><span class="proof-num">02</span><div><strong>Ready in minutes</strong><p>From first idea to a shareable, bookable itinerary.</p></div></article>
-        <article class="proof-card"><span class="proof-num">03</span><div><strong>Easy to reshape</strong><p>Swap a stop, slow it down, or invite a friend anytime.</p></div></article>
+        <article class="proof-card" id="about"><span class="proof-num">03</span><div><strong>Easy to reshape</strong><p>Swap a stop, slow it down, or invite a friend anytime.</p></div></article>
       </section>
     </div>
   </body>

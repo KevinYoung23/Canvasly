@@ -62,6 +62,25 @@ type TransformBody = {
   attachments?: Attachment[];
 };
 
+type CoworkStatus = "completed" | "partial" | "blocked";
+
+type CoworkSuggestion = {
+  label: string;
+  prompt: string;
+  description?: string;
+};
+
+type CoworkResult = {
+  status: CoworkStatus;
+  html?: string;
+  summary: string;
+  updates: string[];
+  issues: string[];
+  suggestions: CoworkSuggestion[];
+};
+
+type ParsedModelResult = { reply: string } | CoworkResult;
+
 const MAX_HTML_LENGTH = 300_000;
 const MAX_INSTRUCTION_LENGTH = 12_000;
 const MAX_DOCUMENT_CONTEXT = 120_000;
@@ -201,18 +220,22 @@ Requirements:
 1. Return a complete, standalone HTML document, not a fragment.
 2. Preserve content and behavior that the user did not ask to change.
 3. Prefer semantic HTML, responsive CSS, accessible contrast, keyboard-friendly controls, and polished spacing.
-4. Do not add external JavaScript dependencies. Avoid remote assets unless the user explicitly asks for them.
-5. Always make an actual change that satisfies the user's instruction; never return the input unchanged.
+4. Do not add JavaScript or external JavaScript dependencies. Canvasly's safe preview removes scripts. Avoid remote assets unless the user explicitly asks for them.
+5. Assess feasibility before editing. Use completed when every requested change is safely implemented, partial when only a useful subset can be implemented, and blocked when no safe change can be made without missing information or violating another requirement.
 6. If selected context is provided, its anchors identify the exact DOM targets inside CURRENT HTML. The first anchor is the primary target. Make the requested local change there, not in a visually similar element elsewhere. Region and drawing targets are ordered by geometric relevance.
 7. Selection placement describes the exact DOM boundary represented by a region or drawing. parentAnchor is the containing element; previousAnchor and nextAnchor are the adjacent siblings around that boundary.
 8. When placement.slotAnchor is present, the user is adding new content. Put every requested new visual component root inside that slot element. Keep the slot as the same plain div with only its existing data-canvasly-insertion-slot attribute, at its exact parentPath, childIndex, and sibling position. Do not turn the slot itself into the component or place the requested component elsewhere. Styles for the new component may still be added to the document head.
 9. Unless the user explicitly asks for a global change, preserve content and layout outside the selected targets. Shared CSS may be adjusted only as needed for the selected targets.
 10. If an image is attached, use it as visual direction or content according to the instruction.
 11. Preserve all data-canvasly-edit-target, data-canvasly-placement-anchor, and data-canvasly-insertion-slot attributes exactly; the application removes them after applying the edit.
-12. Do not explain your reasoning.
+12. Navigation must use semantic <a href="..."> links, never onclick or script-driven buttons. Use #section with a real target id for same-document navigation. Use an absolute HTTPS URL only when the destination is known. If the user requests multiple pages but supplies no destination pages or URLs, report the conflict instead of inventing placeholder links.
+13. Keep the report factual and user-facing. updates lists concrete applied changes. issues lists only unresolved constraints or conflicts. suggestions contains 1-3 actionable choices when an issue remains; each prompt must be a complete follow-up instruction the user can run. Do not expose hidden reasoning.
 
-Return ONLY valid JSON in this exact shape:
-{"html":"<!doctype html>...complete document...","summary":"A concise Chinese summary of what changed"}`;
+For completed or partial work, return ONLY valid JSON in this shape:
+{"status":"completed","html":"<!doctype html>...complete document...","summary":"Concise Chinese outcome","updates":["Concrete change"],"issues":[],"suggestions":[]}
+
+For blocked work, omit html and return ONLY valid JSON in this shape:
+{"status":"blocked","summary":"Concise Chinese explanation","updates":[],"issues":["Concrete reason or conflict"],"suggestions":[{"label":"Short option label","description":"What this option changes","prompt":"Complete follow-up instruction"}]}`;
 }
 
 function buildUserPrompt(
@@ -397,6 +420,33 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+function reportText(value: unknown, maxLength: number) {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function reportList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => reportText(item, 280))
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function reportSuggestions(value: unknown): CoworkSuggestion[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const suggestion = asRecord(item);
+      const label = reportText(suggestion?.label, 64);
+      const prompt = reportText(suggestion?.prompt, 800);
+      const description = reportText(suggestion?.description, 220);
+      if (!label || !prompt) return null;
+      return { label, prompt, ...(description ? { description } : {}) };
+    })
+    .filter((item): item is CoworkSuggestion => item !== null)
+    .slice(0, 3);
+}
+
 function connectionErrorCode(error: unknown) {
   const cause = asRecord(asRecord(error)?.cause);
   return typeof cause?.code === "string" ? cause.code : "";
@@ -465,29 +515,58 @@ function extractText(payload: unknown, protocol: ProviderProtocol) {
   return "";
 }
 
-function parseModelResult(text: string, mode: CollaborationMode) {
+function parseModelResult(text: string, mode: CollaborationMode): ParsedModelResult {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     try {
-      const parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)) as {
-        html?: unknown;
-        summary?: unknown;
-        reply?: unknown;
-      };
-      if (mode === "chat" && typeof parsed.reply === "string") {
+      const parsed = asRecord(JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)));
+      if (mode === "chat" && typeof parsed?.reply === "string") {
         return { reply: parsed.reply };
       }
-      if (typeof parsed.html === "string") {
-        return {
-          html: parsed.html,
-          summary:
-            typeof parsed.summary === "string" ? parsed.summary : "已根据描述更新页面",
-        };
+      if (mode === "cowork" && parsed) {
+        const html = typeof parsed.html === "string" ? parsed.html : undefined;
+        const requestedStatus = reportText(parsed.status, 24);
+        const status: CoworkStatus = ["completed", "partial", "blocked"].includes(
+          requestedStatus,
+        )
+          ? (requestedStatus as CoworkStatus)
+          : html
+            ? "completed"
+            : "blocked";
+        const summary =
+          reportText(parsed.summary, 360) ||
+          (status === "blocked" ? "需要确认下一步后才能继续" : "已根据描述更新页面");
+        const updates = reportList(parsed.updates);
+        const issues = reportList(parsed.issues);
+        const suggestions = reportSuggestions(parsed.suggestions);
+
+        if (status === "blocked") {
+          return {
+            status,
+            summary,
+            updates: [],
+            issues: issues.length ? issues : ["当前需求缺少可安全执行的必要信息"],
+            suggestions,
+          };
+        }
+        if (html) {
+          return {
+            status,
+            html,
+            summary,
+            updates: updates.length ? updates : [summary],
+            issues,
+            suggestions,
+          };
+        }
+      }
+      if (mode === "chat" && trimmed) {
+        return { reply: trimmed };
       }
     } catch {
-      // Fall through to HTML extraction for broadly compatible local models.
+      // Fall through to broadly compatible text or HTML extraction.
     }
   }
 
@@ -497,7 +576,15 @@ function parseModelResult(text: string, mode: CollaborationMode) {
 
   const htmlMatch = trimmed.match(/<!doctype html>[\s\S]*/i) ?? trimmed.match(/<html[\s\S]*<\/html>/i);
   if (htmlMatch) {
-    return { html: htmlMatch[0], summary: "已根据描述更新页面" };
+    const summary = "已根据描述更新页面";
+    return {
+      status: "completed",
+      html: htmlMatch[0],
+      summary,
+      updates: [summary],
+      issues: [],
+      suggestions: [],
+    };
   }
   throw new Error("模型返回格式无法解析，请换一个模型或重试");
 }
@@ -610,13 +697,18 @@ export async function POST(request: Request) {
 
   try {
     const result = parseModelResult(extractText(payload, config.protocol), mode);
-    if (
-      mode === "cowork" &&
-      (typeof result.html !== "string" ||
-        result.html.length > MAX_HTML_LENGTH ||
-        !/<(?:html|body|!doctype)\b/i.test(result.html))
-    ) {
-      return jsonError("模型返回的 HTML 过大或不是完整页面", 502);
+    if (mode === "cowork") {
+      if ("reply" in result) {
+        return jsonError("模型没有返回 Cowork 执行报告", 502);
+      }
+      if (
+        result.status !== "blocked" &&
+        (typeof result.html !== "string" ||
+          result.html.length > MAX_HTML_LENGTH ||
+          !/<(?:html|body|!doctype)\b/i.test(result.html))
+      ) {
+        return jsonError("模型返回的 HTML 过大或不是完整页面", 502);
+      }
     }
     return Response.json(result, {
       headers: { "cache-control": "no-store" },
