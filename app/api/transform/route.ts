@@ -66,6 +66,7 @@ const MAX_HTML_LENGTH = 300_000;
 const MAX_INSTRUCTION_LENGTH = 12_000;
 const MAX_DOCUMENT_CONTEXT = 120_000;
 const MAX_IMAGE_DATA = 5_700_000;
+const MODEL_REQUEST_TIMEOUT_MS = 240_000;
 
 function jsonError(message: string, status = 400) {
   return Response.json({ error: message }, { status });
@@ -396,6 +397,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+function connectionErrorCode(error: unknown) {
+  const cause = asRecord(asRecord(error)?.cause);
+  return typeof cause?.code === "string" ? cause.code : "";
+}
+
+function isRetryableConnectionError(error: unknown) {
+  return ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN"].includes(
+    connectionErrorCode(error),
+  );
+}
+
+function connectionErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "网络请求失败";
+  const code = connectionErrorCode(error);
+  return code ? `${message} (${code})` : message;
+}
+
+function isConnectionTimeout(error: unknown) {
+  return error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name);
+}
+
 function extractText(payload: unknown, protocol: ProviderProtocol) {
   const root = asRecord(payload);
   if (!root) return "";
@@ -532,18 +554,37 @@ export async function POST(request: Request) {
     attachments,
   );
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(endpoint, {
-      method: "POST",
-      headers: providerRequest.headers,
-      body: JSON.stringify(providerRequest.body),
-      redirect: "manual",
-      signal: AbortSignal.timeout(90_000),
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "网络请求失败";
-    return jsonError(`无法连接模型节点：${message}`, 502);
+  const requestBody = JSON.stringify(providerRequest.body);
+  let upstream: Response | undefined;
+  let connectionError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      upstream = await fetch(endpoint, {
+        method: "POST",
+        headers: providerRequest.headers,
+        body: requestBody,
+        redirect: "manual",
+        signal: AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS),
+      });
+      break;
+    } catch (error) {
+      connectionError = error;
+      if (attempt === 0 && isRetryableConnectionError(error)) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (!upstream) {
+    if (isConnectionTimeout(connectionError)) {
+      return jsonError(
+        `模型在 ${MODEL_REQUEST_TIMEOUT_MS / 1_000} 秒内未完成响应，请重试或选择更快的模型`,
+        504,
+      );
+    }
+    return jsonError(`无法连接模型节点：${connectionErrorMessage(connectionError)}`, 502);
   }
 
   if (upstream.status >= 300 && upstream.status < 400) {
