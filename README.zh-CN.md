@@ -90,7 +90,7 @@
 
 ### Docker — 推荐
 
-先安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，然后运行：
+先安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)。等待界面显示 Docker 正在运行，然后执行：
 
 ```bash
 # macOS / Linux
@@ -105,6 +105,14 @@ Canvasly 将打开在 [http://localhost:4173](http://localhost:4173)。
 ```bash
 docker compose up -d   # 再次启动
 docker compose down    # 停止
+```
+
+如果安装器提示无法连接 Docker daemon，请先启动 Docker Desktop 后重试。如果当前网络连接 `auth.docker.io` 超时，可通过公共 ECR 镜像预拉取官方 Node 镜像：
+
+```bash
+docker pull public.ecr.aws/docker/library/node:22-alpine
+docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
+./install.sh
 ```
 
 ### 本地开发

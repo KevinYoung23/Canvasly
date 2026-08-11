@@ -13,6 +13,12 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is installed, but its daemon is not running."
+  echo "Start Docker Desktop, wait until it reports that Docker is running, then run this file again."
+  exit 1
+fi
+
 if [[ ! -f .env ]]; then
   cp .env.example .env
 fi

@@ -7,6 +7,11 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 docker compose version | Out-Null
 
+docker info 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Docker is installed, but its daemon is not running. Start Docker Desktop, wait until it reports that Docker is running, then run this file again."
+}
+
 if (-not (Test-Path ".env")) {
   Copy-Item ".env.example" ".env"
 }

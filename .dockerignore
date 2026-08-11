@@ -1,0 +1,17 @@
+.git
+.github
+.next
+.sites-runtime
+.wrangler
+dist
+node_modules
+
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+
+docs/assets/*.gif
+docs/assets/*.mp4

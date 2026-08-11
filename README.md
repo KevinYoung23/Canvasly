@@ -90,7 +90,7 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 
 ### Docker — recommended
 
-Install [Docker Desktop](https://www.docker.com/products/docker-desktop/), then run:
+Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/). Wait until it reports that Docker is running, then run:
 
 ```bash
 # macOS / Linux
@@ -105,6 +105,14 @@ Canvasly opens at [http://localhost:4173](http://localhost:4173).
 ```bash
 docker compose up -d   # start again
 docker compose down    # stop
+```
+
+If the installer says that it cannot connect to the Docker daemon, start Docker Desktop and retry. If your network times out while contacting `auth.docker.io`, seed the official Node image through its public ECR mirror:
+
+```bash
+docker pull public.ecr.aws/docker/library/node:22-alpine
+docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
+./install.sh
 ```
 
 ### Local development
