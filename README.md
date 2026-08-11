@@ -153,7 +153,7 @@ API key:   empty
 
 You can switch the same preset to Chat Completions for compatible gateways.
 
-Docker blocks localhost and private-network model endpoints by default. To use a trusted local service, set `ALLOW_PRIVATE_LLM_ENDPOINTS=true` in the ignored `.env` file and restart Canvasly. Keep this disabled on any public deployment.
+The bundled Docker setup binds Canvasly to `127.0.0.1` and allows trusted localhost, Docker-host, and private-network model endpoints by default. Set `ALLOW_PRIVATE_LLM_ENDPOINTS=false` before exposing Canvasly beyond your machine, then restart the service.
 
 ### GitHub Copilot login
 
@@ -210,8 +210,8 @@ flowchart LR
 
 - API keys are never written to local storage, logs, or project files.
 - Remote model endpoints must use HTTPS.
-- The bundled Compose stack binds to `127.0.0.1`; literal local/private endpoints require explicit self-hosted opt-in.
-- Public operators should keep private endpoints disabled and enforce outbound network policy for custom DNS hostnames.
+- The bundled Compose stack binds to `127.0.0.1` and permits trusted local/private endpoints for local use.
+- Before exposing Canvasly beyond the local machine, operators must set `ALLOW_PRIVATE_LLM_ENDPOINTS=false` and enforce outbound network policy for custom DNS hostnames.
 - Redirects are rejected and request, HTML, attachment, and image sizes are bounded.
 - Preview scripts and refresh redirects are removed before rendering.
 - The iframe uses CSP plus sandbox isolation and does not execute generated JavaScript.

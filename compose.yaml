@@ -6,7 +6,7 @@ services:
     ports:
       - "127.0.0.1:${CANVASLY_PORT:-4173}:3000"
     environment:
-      ALLOW_PRIVATE_LLM_ENDPOINTS: "${ALLOW_PRIVATE_LLM_ENDPOINTS:-false}"
+      ALLOW_PRIVATE_LLM_ENDPOINTS: "${ALLOW_PRIVATE_LLM_ENDPOINTS:-true}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

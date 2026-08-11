@@ -15,8 +15,8 @@ Include the affected version, reproduction steps, impact, and any suggested miti
 ## Security boundaries
 
 - Model credentials are held in browser memory only.
-- The bundled Compose stack binds to `127.0.0.1` and disables private endpoint access by default.
-- Literal localhost and private IP endpoints require explicit operator opt-in through `ALLOW_PRIVATE_LLM_ENDPOINTS=true`.
+- The bundled Compose stack binds to `127.0.0.1` and allows trusted private endpoint access for local use.
+- Before exposing Canvasly beyond the local machine, operators must set `ALLOW_PRIVATE_LLM_ENDPOINTS=false`.
 - Remote model endpoint hostnames must use HTTPS. Operators remain responsible for outbound network policy, including DNS-resolved private addresses.
 - Redirects and oversized inputs are rejected.
 - Generated scripts are removed before preview rendering.
@@ -26,8 +26,8 @@ Include the affected version, reproduction steps, impact, and any suggested miti
 ## 安全边界
 
 - 模型凭据只保存在浏览器内存中。
-- 随附的 Compose 配置默认仅绑定 `127.0.0.1`，并关闭私有节点访问。
-- localhost 与私有 IP 节点只有在运维者明确设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=true` 后才能访问。
+- 随附的 Compose 配置仅绑定 `127.0.0.1`，并允许本地使用可信的私有节点。
+- 将 Canvasly 暴露到本机之外前，运维者必须设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`。
 - 远程模型节点域名必须使用 HTTPS；运维者仍需负责出站网络策略，包括解析到私有地址的 DNS 域名。
 - 系统会拒绝重定向和超出大小限制的输入。
 - 生成内容中的脚本会在预览渲染前移除。

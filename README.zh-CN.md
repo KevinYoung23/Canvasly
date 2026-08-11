@@ -153,7 +153,7 @@ API key：  留空
 
 如果网关只支持 Chat Completions，可在同一个预设中切换协议。
 
-Docker 默认禁止访问 localhost 与私有网络模型节点。连接可信本地服务时，请在已被忽略的 `.env` 文件中设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=true`，再重启 Canvasly。任何公开部署都应保持关闭。
+随附的 Docker 配置只将 Canvasly 绑定到 `127.0.0.1`，因此默认允许访问可信的 localhost、Docker 宿主机与私有网络模型节点。将 Canvasly 暴露到本机之外前，请在 `.env` 中设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=false` 并重启服务。
 
 ### GitHub Copilot 登录
 
@@ -212,8 +212,8 @@ flowchart LR
 
 - API 密钥不会写入 localStorage、日志或项目文件。
 - 远程模型节点必须使用 HTTPS。
-- 随附的 Compose 配置仅绑定 `127.0.0.1`；本地或私有节点必须由自托管运维者明确放行。
-- 公开部署应保持私有节点访问关闭，并针对自定义 DNS 域名配置出站网络策略。
+- 随附的 Compose 配置仅绑定 `127.0.0.1`，并允许本地使用可信的本地或私有节点。
+- 将 Canvasly 暴露到本机之外前，运维者必须设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`，并针对自定义 DNS 域名配置出站网络策略。
 - 拒绝远程重定向，并限制请求、HTML、附件与图片大小。
 - 渲染前移除脚本与刷新重定向。
 - iframe 使用 CSP 与 sandbox 隔离，不执行生成的 JavaScript。
