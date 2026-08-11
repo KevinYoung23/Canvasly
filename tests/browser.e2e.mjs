@@ -416,6 +416,69 @@ test("prompt history restores commands and the unsent draft", async () => {
   }
 });
 
+test("IME composition Enter confirms text without sending", async () => {
+  gatewayRequests.length = 0;
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const composer = page.locator(".composer textarea");
+    await composer.fill("english from Chinese IME");
+    await composer.dispatchEvent("compositionstart", { data: "english" });
+    await composer.dispatchEvent("keydown", {
+      key: "ArrowUp",
+      code: "ArrowUp",
+      isComposing: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      isComposing: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    await page.waitForTimeout(100);
+
+    assert.equal(await composer.inputValue(), "english from Chinese IME");
+    assert.equal(gatewayRequests.length, 0);
+    assert.equal(await page.locator(".message.user").count(), 0);
+    assert.equal(await page.locator(".message.working").count(), 0);
+
+    await composer.dispatchEvent("compositionend", { data: "english" });
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 229,
+      which: 229,
+      isComposing: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    await page.waitForTimeout(50);
+    assert.equal(gatewayRequests.length, 0);
+    assert.equal(await composer.inputValue(), "english from Chinese IME");
+
+    await composer.press("Enter");
+    await page.locator(".message.working").waitFor({ state: "visible" });
+    await page.locator(".message.working").waitFor({ state: "hidden" });
+    assert.equal(gatewayRequests.filter((item) => item.instruction === "english from Chinese IME").length, 1);
+  } finally {
+    await context.close();
+  }
+});
+
 test("mobile execution report does not create horizontal overflow", async () => {
   const { context, page } = await newPage({ width: 390, height: 844 });
   try {

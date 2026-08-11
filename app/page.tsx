@@ -1397,6 +1397,7 @@ export default function Home() {
   });
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
+  const promptComposingRef = useRef(false);
   const navigationIssueRef = useRef({ key: "", timestamp: 0 });
 
   const currentHtml = history[historyIndex];
@@ -2757,6 +2758,13 @@ export default function Home() {
   };
 
   const handlePromptKeydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      promptComposingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
     if (event.key === "ArrowUp") {
       const history = promptHistoryRef.current[collaborationMode];
       const beforeCursor = event.currentTarget.value.slice(
@@ -3386,6 +3394,15 @@ export default function Home() {
                       setPrompt(event.target.value);
                       promptHistoryIndexRef.current = null;
                       promptHistoryDraftRef.current = "";
+                    }}
+                    onCompositionStart={() => {
+                      promptComposingRef.current = true;
+                    }}
+                    onCompositionEnd={() => {
+                      promptComposingRef.current = false;
+                    }}
+                    onBlur={() => {
+                      promptComposingRef.current = false;
                     }}
                     onKeyDown={handlePromptKeydown}
                     placeholder={

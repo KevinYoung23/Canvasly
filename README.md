@@ -249,7 +249,7 @@ Start the Docker app before running E2E tests. Browser tests use an installed Mi
 ```bash
 ./install.sh
 npm run test:api       # 12 deterministic API contract cases
-npm run test:browser   # 10 deterministic UI and workflow cases
+npm run test:browser   # 11 deterministic UI and workflow cases
 npm run test:model     # 14 real local gpt-5.5 cases, including one browser flow
 npm run test:e2e       # all three suites in sequence
 ```

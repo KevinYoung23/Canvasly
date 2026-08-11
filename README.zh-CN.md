@@ -251,7 +251,7 @@ node --check tools/copilot-bridge.mjs
 ```bash
 ./install.sh
 npm run test:api       # 12 个确定性 API 契约 case
-npm run test:browser   # 10 个确定性 UI 与工作流 case
+npm run test:browser   # 11 个确定性 UI 与工作流 case
 npm run test:model     # 14 个真实本地 gpt-5.5 case，含一个浏览器完整链路
 npm run test:e2e       # 依次运行以上三套测试
 ```
