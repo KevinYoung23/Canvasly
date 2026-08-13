@@ -6,6 +6,9 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 
 docker compose version | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Docker Compose is required. Update Docker Desktop, then run this file again."
+}
 
 docker info 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -34,9 +37,12 @@ if ($copilotRequested) {
   if ($privateEndpoints -ne "true") {
     Write-Error "The Copilot profile requires ALLOW_PRIVATE_LLM_ENDPOINTS=true in .env."
   }
-  docker compose --profile copilot up --build -d
+  docker compose --profile copilot up --build -d --wait --wait-timeout 300
 } else {
-  docker compose up --build -d
+  docker compose up --build -d --wait --wait-timeout 300
+}
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Canvasly failed to build or become healthy. Run 'docker compose logs canvasly' for details."
 }
 
 $portLine = Get-Content ".env" | Where-Object { $_ -match "^CANVASLY_PORT=" } | Select-Object -Last 1

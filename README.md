@@ -90,23 +90,72 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 
 ## Quick start
 
-### Docker — recommended
+### One-command setup on a new computer — recommended for beginners
 
-Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/). Wait until it reports that Docker is running, then run:
+The command for your platform will:
+
+1. Download Canvasly into a `Canvasly` folder in your home directory.
+2. Detect Docker Desktop and download it from Docker when it is missing.
+3. Start Docker, build Canvasly, wait for a healthy service, and open the browser.
+
+> [!NOTE]
+> This setup is for **local use**. The service listens only on `127.0.0.1`, so other devices on the LAN cannot connect directly. Docker's first-run license confirmation, a macOS password prompt, Windows WSL 2 approval, or a required restart are operating-system security steps and cannot be bypassed. If Windows requests a restart, restart it and run the same command again.
+
+#### Windows 10 / 11
+
+Open **PowerShell** from the Start menu, then paste and run this entire line:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force; $installer = Join-Path $env:TEMP "canvasly-bootstrap.ps1"; Invoke-WebRequest "https://raw.githubusercontent.com/KevinYoung23/Canvasly/main/bootstrap-windows.ps1" -OutFile $installer; & $installer
+```
+
+Requires 64-bit Windows with CPU virtualization enabled and at least 8 GB RAM. The installer uses Docker's recommended per-user installation and the WSL 2 backend, requesting administrator approval to enable WSL 2 when needed. If it requests a restart, restart and run the same command to continue.
+
+#### macOS
+
+Open **Terminal**, then paste and run this entire line:
+
+```bash
+curl -fL --retry 3 https://raw.githubusercontent.com/KevinYoung23/Canvasly/main/bootstrap-macos.sh -o /tmp/canvasly-bootstrap.sh && bash /tmp/canvasly-bootstrap.sh
+```
+
+Supports Apple silicon and Intel Macs on a macOS release currently supported by Docker Desktop. At least 4 GB RAM is required. macOS asks for your local password while installing Docker.
+
+The first image download and build takes longer than later starts. When setup finishes, Canvasly opens at [http://localhost:4173](http://localhost:4173). You can choose **Canvasly Demo** without an API key; to use a real AI model, open model settings, choose a provider, and enter your own API key. Projects and version history currently live only in that browser tab, so export the HTML before refreshing or closing it.
+
+### If you already downloaded the project
+
+Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/), then run this from the project directory:
 
 ```bash
 # macOS / Linux
-./install.sh
+bash ./install.sh
 
 # Windows PowerShell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Canvasly opens at [http://localhost:4173](http://localhost:4173).
+### Start and stop it later
+
+Start Docker Desktop and wait until it reports that Docker is running, then use the command for your platform:
 
 ```bash
-docker compose up -d   # start again
-docker compose down    # stop
+# macOS Terminal
+cd ~/Canvasly
+docker compose up -d
+```
+
+```powershell
+# Windows PowerShell
+Set-Location "$HOME\Canvasly"
+docker compose up -d
+```
+
+Open [http://localhost:4173](http://localhost:4173). From the same project directory, stop the service or inspect failure logs with:
+
+```bash
+docker compose down
+docker compose logs canvasly
 ```
 
 If the installer says that it cannot connect to the Docker daemon, start Docker Desktop and retry. If your network times out while contacting `auth.docker.io`, seed the official Node image through its public ECR mirror:
@@ -114,8 +163,11 @@ If the installer says that it cannot connect to the Docker daemon, start Docker 
 ```bash
 docker pull public.ecr.aws/docker/library/node:22-alpine
 docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
-./install.sh
+# macOS / Linux: bash ./install.sh
+# Windows: powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
+
+Public hosting is outside the scope of this one-command setup. Canvasly currently has no built-in account system, and projects and version history live only in the current browser session. Internet access requires authentication, HTTPS, a domain, firewall rules, and a reverse proxy at minimum, with `ALLOW_PRIVATE_LLM_ENDPOINTS=false`. Beginners should not expose this setup directly to the public internet.
 
 ### Local development
 
@@ -230,8 +282,11 @@ app/
 tools/
   copilot-bridge.mjs       optional logged-in GitHub Copilot SDK bridge
 docs/assets/               screenshots, banner, GIF, and promotional video
-worker/index.ts            Cloudflare/Vinext worker entry
-compose.yaml               self-hosted services
+worker/index.ts            Cloudflare/Vinext Worker entry
+bootstrap-macos.sh         New-computer installer for macOS
+bootstrap-windows.ps1      New-computer installer for Windows
+install.sh / install.ps1   Project-local Docker installers
+compose.yaml               Self-hosted services
 ```
 
 ## Development checks

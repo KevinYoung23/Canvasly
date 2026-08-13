@@ -90,23 +90,72 @@
 
 ## 快速开始
 
-### Docker — 推荐
+### 新电脑一键安装 — 推荐小白
 
-先安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)。等待界面显示 Docker 正在运行，然后执行：
+下面的一条命令会自动完成这些工作：
+
+1. 把 Canvasly 下载到用户目录下的 `Canvasly` 文件夹。
+2. 检测 Docker Desktop；没有安装时，从 Docker 官网下载并安装。
+3. 启动 Docker、构建 Canvasly，并在服务健康后打开浏览器。
+
+> [!NOTE]
+> 一键安装用于**本机使用**，服务只监听 `127.0.0.1`，同一局域网中的其他设备也无法直接访问。Docker 首次运行时的许可确认、macOS 密码、Windows WSL 2 授权或系统重启属于系统安全步骤，脚本不能代替你确认；如 Windows 要求重启，重启后再次执行同一条命令即可。
+
+#### Windows 10 / 11
+
+打开开始菜单中的 **PowerShell**，复制并执行整行命令：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force; $installer = Join-Path $env:TEMP "canvasly-bootstrap.ps1"; Invoke-WebRequest "https://raw.githubusercontent.com/KevinYoung23/Canvasly/main/bootstrap-windows.ps1" -OutFile $installer; & $installer
+```
+
+要求 64 位 Windows、已开启 CPU 虚拟化并至少有 8 GB 内存。安装器使用 Docker 官方推荐的当前用户安装模式和 WSL 2 后端，并会在需要时请求管理员授权来启用 WSL 2；如果提示重启，重启后执行同一条命令即可继续。
+
+#### macOS
+
+打开 **终端（Terminal）**，复制并执行整行命令：
+
+```bash
+curl -fL --retry 3 https://raw.githubusercontent.com/KevinYoung23/Canvasly/main/bootstrap-macos.sh -o /tmp/canvasly-bootstrap.sh && bash /tmp/canvasly-bootstrap.sh
+```
+
+支持 Docker Desktop 当前支持的 macOS 版本和 Apple 芯片 / Intel 芯片，最低需要 4 GB 内存。安装 Docker 时 macOS 会要求输入本机密码。
+
+第一次下载镜像并构建通常比以后启动慢。完成后，Canvasly 会打开在 [http://localhost:4173](http://localhost:4173)。无需 API 密钥也可先选择 **Canvasly Demo** 体验；使用真实 AI 时，再到右上角的模型设置中选择服务商并填写自己的 API 密钥。当前项目和版本历史只保留在这个浏览器标签页中，刷新或关闭前请导出 HTML。
+
+### 已经下载了项目
+
+如果项目文件已经在电脑上，先安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，再在项目目录中执行：
 
 ```bash
 # macOS / Linux
-./install.sh
+bash ./install.sh
 
 # Windows PowerShell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Canvasly 将打开在 [http://localhost:4173](http://localhost:4173)。
+### 再次启动与停止
+
+以后使用时，先打开 Docker Desktop，等待它显示正在运行，再执行对应命令：
 
 ```bash
-docker compose up -d   # 再次启动
-docker compose down    # 停止
+# macOS 终端
+cd ~/Canvasly
+docker compose up -d
+```
+
+```powershell
+# Windows PowerShell
+Set-Location "$HOME\Canvasly"
+docker compose up -d
+```
+
+浏览器访问 [http://localhost:4173](http://localhost:4173)。在同一个项目目录中，可用下面的命令停止服务或查看故障日志：
+
+```bash
+docker compose down
+docker compose logs canvasly
 ```
 
 如果安装器提示无法连接 Docker daemon，请先启动 Docker Desktop 后重试。如果当前网络连接 `auth.docker.io` 超时，可通过公共 ECR 镜像预拉取官方 Node 镜像：
@@ -114,8 +163,11 @@ docker compose down    # 停止
 ```bash
 docker pull public.ecr.aws/docker/library/node:22-alpine
 docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
-./install.sh
+# macOS / Linux：bash ./install.sh
+# Windows：powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
+
+公网部署不属于上述一键安装范围。Canvasly 当前没有内置账号系统，而且项目与版本历史只保存在当前浏览器会话中；如需让其他人通过互联网访问，至少还要配置身份验证、HTTPS、域名、防火墙和反向代理，并将 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`。不建议零基础用户直接把它暴露到公网。
 
 ### 本地开发
 
@@ -233,6 +285,9 @@ tools/
   copilot-bridge.mjs       可选的 GitHub Copilot 登录态 bridge
 docs/assets/               截图、封面、GIF 与宣传视频
 worker/index.ts            Cloudflare/Vinext Worker 入口
+bootstrap-macos.sh         macOS 新电脑一键安装
+bootstrap-windows.ps1      Windows 新电脑一键安装
+install.sh / install.ps1   项目内 Docker 安装入口
 compose.yaml               自托管服务
 ```
 

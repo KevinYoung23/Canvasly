@@ -41,9 +41,9 @@ if [[ "${1:-}" == "--copilot" ]]; then
     echo "The Copilot profile requires ALLOW_PRIVATE_LLM_ENDPOINTS=true in .env."
     exit 1
   fi
-  docker compose --profile copilot up --build -d
+  docker compose --profile copilot up --build -d --wait --wait-timeout 300
 else
-  docker compose up --build -d
+  docker compose up --build -d --wait --wait-timeout 300
 fi
 
 canvasly_port="$(sed -n 's/^CANVASLY_PORT=//p' .env | tail -1)"
