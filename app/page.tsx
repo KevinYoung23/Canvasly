@@ -40,6 +40,7 @@ import {
   X,
   ListPlus,
   Route,
+  RefreshCw,
 } from "lucide-react";
 import {
   useCallback,
@@ -61,6 +62,13 @@ import {
   type ProviderId,
   type ProviderProtocol,
 } from "./editor-data";
+import {
+  desktopErrorMessage,
+  formatDesktopBytes,
+  type DesktopInfo,
+  type DesktopProjectSnapshot,
+  type DesktopUpdateState,
+} from "./desktop-api";
 
 type ToolMode = "interact" | "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
@@ -1358,6 +1366,13 @@ export default function Home() {
   const [agentQueue, setAgentQueue] = useState<AgentJob[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [desktopInfo, setDesktopInfo] = useState<DesktopInfo | null>(null);
+  const [desktopUpdate, setDesktopUpdate] =
+    useState<DesktopUpdateState | null>(null);
+  const [desktopPersistenceReady, setDesktopPersistenceReady] = useState(false);
+  const [desktopPersistenceError, setDesktopPersistenceError] =
+    useState<string | null>(null);
+  const [desktopSavedAt, setDesktopSavedAt] = useState<string | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
     providerId: initialProvider.id,
     protocol: initialProvider.protocol,
@@ -1399,6 +1414,8 @@ export default function Home() {
   const promptHistoryDraftRef = useRef("");
   const promptComposingRef = useRef(false);
   const navigationIssueRef = useRef({ key: "", timestamp: 0 });
+  const desktopSnapshotRef = useRef<DesktopProjectSnapshot | null>(null);
+  const desktopSaveErrorRef = useRef("");
 
   const currentHtml = history[historyIndex];
   const previewHtml = useMemo(() => safePreviewHtml(currentHtml), [currentHtml]);
@@ -1416,6 +1433,26 @@ export default function Home() {
     isWorking || activeAgentJob !== null || agentQueue.length > 0;
   const messages =
     collaborationMode === "cowork" ? coworkMessages : chatMessages;
+  const desktopSnapshot = useMemo<DesktopProjectSnapshot>(
+    () => ({
+      schemaVersion: 1,
+      projectName,
+      history,
+      historyIndex,
+      codeDraft,
+      projectBaseline,
+      savedHtml,
+      savedAt: new Date().toISOString(),
+    }),
+    [
+      codeDraft,
+      history,
+      historyIndex,
+      projectBaseline,
+      projectName,
+      savedHtml,
+    ],
+  );
 
   const appendModeMessage = useCallback(
     (mode: CollaborationMode, message: ChatMessage) => {
@@ -1447,6 +1484,122 @@ export default function Home() {
     setToast(message);
     window.setTimeout(() => setToast(null), 2600);
   }, []);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (!desktop) return;
+
+    let disposed = false;
+    const unsubscribe = desktop.onUpdateState((state) => {
+      if (!disposed) setDesktopUpdate(state);
+    });
+    void (async () => {
+      try {
+        const [info, update] = await Promise.all([
+          desktop.getInfo(),
+          desktop.getUpdateState(),
+        ]);
+        if (disposed) return;
+        setDesktopInfo(info);
+        setDesktopUpdate(update);
+
+        try {
+          const snapshot = await desktop.loadProject();
+          if (disposed) return;
+          if (snapshot) {
+            documentRevisionRef.current += 1;
+            setProjectName(snapshot.projectName);
+            setHistory(snapshot.history);
+            setHistoryIndex(snapshot.historyIndex);
+            setCodeDraft(snapshot.codeDraft);
+            setProjectBaseline(snapshot.projectBaseline);
+            setSavedHtml(snapshot.savedHtml);
+            setDesktopSavedAt(snapshot.savedAt);
+          }
+          setDesktopPersistenceReady(true);
+        } catch (error) {
+          if (disposed) return;
+          const message = desktopErrorMessage(error);
+          console.error("[Canvasly] Desktop project restore failed", error);
+          setDesktopPersistenceError(message);
+          showToast(`桌面项目恢复失败：${message}`);
+        }
+      } catch (error) {
+        if (disposed) return;
+        const message = desktopErrorMessage(error);
+        console.error("[Canvasly] Desktop initialization failed", error);
+        showToast(`桌面功能初始化失败：${message}`);
+      }
+    })();
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
+  }, [showToast]);
+
+  useEffect(() => {
+    desktopSnapshotRef.current = desktopSnapshot;
+  }, [desktopSnapshot]);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (!desktop || !desktopInfo || !desktopPersistenceReady) return;
+
+    const timeout = window.setTimeout(() => {
+      void desktop
+        .saveProject(desktopSnapshot)
+        .then(({ savedAt }) => {
+          setDesktopSavedAt(savedAt);
+          desktopSaveErrorRef.current = "";
+        })
+        .catch((error: unknown) => {
+          const message = desktopErrorMessage(error);
+          console.error("[Canvasly] Desktop autosave failed", error);
+          if (desktopSaveErrorRef.current !== message) {
+            desktopSaveErrorRef.current = message;
+            showToast(`桌面自动保存失败：${message}`);
+          }
+        });
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [
+    desktopInfo,
+    desktopPersistenceReady,
+    desktopSnapshot,
+    showToast,
+  ]);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (
+      !desktop ||
+      !desktopInfo ||
+      !desktopPersistenceReady ||
+      desktopPersistenceError
+    ) {
+      return;
+    }
+    const saveBeforeUnload = () => {
+      const snapshot = desktopSnapshotRef.current;
+      if (!snapshot) return;
+      try {
+        const result = desktop.saveProjectBeforeUnload(snapshot);
+        if (!result.ok) {
+          console.error(
+            `[Canvasly] Desktop unload save failed: ${result.message}`,
+          );
+        }
+      } catch (error) {
+        console.error("[Canvasly] Desktop unload save failed", error);
+      }
+    };
+    window.addEventListener("beforeunload", saveBeforeUnload);
+    return () => window.removeEventListener("beforeunload", saveBeforeUnload);
+  }, [
+    desktopInfo,
+    desktopPersistenceError,
+    desktopPersistenceReady,
+  ]);
 
   const chooseCoworkSuggestion = useCallback((suggestion: CoworkSuggestion) => {
     setCollaborationMode("cowork");
@@ -2834,10 +2987,13 @@ export default function Home() {
 
   const chooseProvider = (providerId: ProviderId) => {
     const selected = PROVIDERS.find((item) => item.id === providerId) ?? PROVIDERS[0];
+    const baseUrl = desktopInfo
+      ? selected.baseUrl.replace("host.docker.internal", "127.0.0.1")
+      : selected.baseUrl;
     setDraftConfig({
       providerId: selected.id,
       protocol: selected.protocol,
-      baseUrl: selected.baseUrl,
+      baseUrl,
       model: selected.model,
       apiKey: "",
     });
@@ -2861,6 +3017,63 @@ export default function Home() {
         : `已连接 ${PROVIDERS.find((item) => item.id === draftConfig.providerId)?.name}`,
     );
   };
+
+  const handleDesktopUpdate = async () => {
+    const desktop = window.canvaslyDesktop;
+    if (!desktop || !desktopUpdate) return;
+    try {
+      if (desktopUpdate.status === "available") {
+        await desktop.downloadUpdate();
+        return;
+      }
+      if (desktopUpdate.status === "downloaded") {
+        if (hasAgentWork) {
+          showToast("请等待当前 Agent 队列完成后再安装更新");
+          return;
+        }
+        if (hasStagedMoves) {
+          showToast("请先确认或放弃移动草稿，再安装更新");
+          return;
+        }
+        if (desktopPersistenceError) {
+          showToast("项目自动保存不可用，请先导出 HTML 再安装更新");
+          return;
+        }
+        await desktop.saveProject(desktopSnapshot);
+        await desktop.installUpdate();
+        return;
+      }
+      await desktop.checkForUpdates();
+    } catch (error) {
+      const message = desktopErrorMessage(error);
+      console.error("[Canvasly] Desktop update action failed", error);
+      showToast(`更新操作失败：${message}`);
+    }
+  };
+
+  const desktopUpdateButton = (() => {
+    if (!desktopUpdate) return { label: "检查更新", disabled: true };
+    switch (desktopUpdate.status) {
+      case "checking":
+        return { label: "检查中…", disabled: true };
+      case "available":
+        return {
+          label: `下载 v${desktopUpdate.version ?? ""}`,
+          disabled: false,
+        };
+      case "downloading":
+        return {
+          label: `下载中 ${Math.round(desktopUpdate.percent ?? 0)}%`,
+          disabled: true,
+        };
+      case "downloaded":
+        return { label: "重启并安装", disabled: false };
+      case "unsupported":
+        return { label: "仅安装版可更新", disabled: true };
+      default:
+        return { label: "检查更新", disabled: false };
+    }
+  })();
 
   const exportHtml = () => {
     if (hasStagedMoves) {
@@ -3042,6 +3255,20 @@ export default function Home() {
             <button onClick={redo} disabled={hasStagedMoves || !canRedo} aria-label="重做" title="重做 · ⇧⌘Z" type="button"><Redo2 size={17} /></button>
           </div>
           <button className="ghost-action hide-on-small" onClick={resetProject} disabled={hasAgentWork} type="button"><RotateCcw size={15} />重置</button>
+          {desktopInfo && desktopUpdate && (
+            <button
+              className={`icon-action desktop-update-shortcut ${desktopUpdate.status === "available" || desktopUpdate.status === "downloaded" ? "has-update" : ""}`}
+              onClick={() => void handleDesktopUpdate()}
+              disabled={desktopUpdateButton.disabled}
+              aria-label={`桌面更新：${desktopUpdateButton.label}`}
+              title={desktopUpdateButton.label}
+              type="button"
+            >
+              {desktopUpdate.status === "checking" || desktopUpdate.status === "downloading"
+                ? <Loader2 size={17} className="spin" />
+                : <RefreshCw size={17} />}
+            </button>
+          )}
           <button className="ghost-action" onClick={openSettings} type="button">
             <span className="provider-mini" style={{ background: provider.color }} />
             <span className="hide-on-small">{provider.name}</span>
@@ -3587,10 +3814,62 @@ export default function Home() {
                   {(draftConfig.providerId === "local" || draftConfig.providerId === "copilot" || draftConfig.providerId === "custom") && (
                     <div className="local-note">
                       <Monitor size={15} />
-                      本机开发可使用 <code>127.0.0.1</code>；Docker 中请用 <code>host.docker.internal</code> 指向宿主机。
+                      {desktopInfo ? (
+                        <>桌面版使用 <code>127.0.0.1</code> 连接这台电脑上的模型服务。</>
+                      ) : (
+                        <>本机开发可使用 <code>127.0.0.1</code>；Docker 中请用 <code>host.docker.internal</code> 指向宿主机。</>
+                      )}
                     </div>
                   )}
                 </div>
+              )}
+
+              {desktopInfo && desktopUpdate && (
+                <section className="desktop-update-card" aria-labelledby="desktop-update-title">
+                  <div className="desktop-update-heading">
+                    <span className="desktop-update-icon"><RefreshCw size={16} /></span>
+                    <div>
+                      <strong id="desktop-update-title">Canvasly 桌面版</strong>
+                      <small>当前版本 v{desktopInfo.version}</small>
+                    </div>
+                    <button
+                      className="desktop-update-button"
+                      onClick={() => void handleDesktopUpdate()}
+                      disabled={desktopUpdateButton.disabled}
+                      type="button"
+                    >
+                      {(desktopUpdate.status === "checking" || desktopUpdate.status === "downloading") && <Loader2 size={13} className="spin" />}
+                      {desktopUpdateButton.label}
+                    </button>
+                  </div>
+                  <p className={`desktop-update-message ${desktopUpdate.status === "error" ? "error" : ""}`} aria-live="polite">
+                    {desktopUpdate.message}
+                  </p>
+                  {desktopUpdate.status === "downloading" && (
+                    <div className="desktop-update-progress">
+                      <span style={{ width: `${Math.max(0, Math.min(100, desktopUpdate.percent ?? 0))}%` }} />
+                    </div>
+                  )}
+                  {desktopUpdate.status === "downloading" && desktopUpdate.total !== undefined && (
+                    <small className="desktop-update-size">
+                      {formatDesktopBytes(desktopUpdate.transferred)} / {formatDesktopBytes(desktopUpdate.total)}
+                      {desktopUpdate.bytesPerSecond ? ` · ${formatDesktopBytes(desktopUpdate.bytesPerSecond)}/s` : ""}
+                    </small>
+                  )}
+                  {desktopUpdate.releaseNotes && (
+                    <details className="desktop-release-notes">
+                      <summary>查看更新说明</summary>
+                      <p>{desktopUpdate.releaseNotes}</p>
+                    </details>
+                  )}
+                  <small className="desktop-save-state">
+                    {desktopPersistenceError
+                      ? `项目自动保存不可用：${desktopPersistenceError}`
+                      : `项目与版本历史已自动保存在此电脑${desktopSavedAt ? ` · ${new Date(desktopSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
+                    }
+                    ；API 密钥不会保存
+                  </small>
+                </section>
               )}
             </div>
 

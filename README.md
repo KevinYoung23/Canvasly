@@ -90,7 +90,29 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 
 ## Quick start
 
-### One-command setup on a new computer — recommended for beginners
+### Desktop app — recommended for beginners
+
+Download the installer for your system from [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases/latest):
+
+- **macOS:** download the `.dmg`, open it, and drag Canvasly into Applications. Apple silicon and Intel Macs are supported.
+- **Windows 10 / 11:** download and run the `.exe` whose name starts with `Canvasly-Setup-`.
+
+The desktop app includes its local service, so **Docker, Node.js, and Git are not required**. It automatically saves the project and up to 30 versions on this computer; API keys still remain only in the current app session.
+
+#### In-app updates
+
+Use the small update button in the top bar, or open model settings and find **Canvasly Desktop** at the bottom:
+
+1. Select **Check for updates**.
+2. When a new GitHub Release is available, download it and follow the progress.
+3. Select **Restart and install** when the download finishes.
+
+Canvasly also checks shortly after launch and every six hours, but never forces a download or restart. It saves the project before installing; active Agent work or unconfirmed move drafts must be completed first.
+
+> [!IMPORTANT]
+> macOS automatic updates require Apple Developer ID signing and notarization. Production Windows installers should use a code-signing certificate. Unsigned local test packages may trigger operating-system security warnings.
+
+### Docker one-command setup — local self-hosting
 
 The command for your platform will:
 
@@ -123,9 +145,37 @@ Supports Apple silicon and Intel Macs on a macOS release currently supported by 
 
 The first image download and build takes longer than later starts. When setup finishes, Canvasly opens at [http://localhost:4173](http://localhost:4173). You can choose **Canvasly Demo** without an API key; to use a real AI model, open model settings, choose a provider, and enter your own API key. Projects and version history currently live only in that browser tab, so export the HTML before refreshing or closing it.
 
-### If you already downloaded the project
+### Docker: if you already downloaded the project
 
-Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/), then run this from the project directory:
+You do not need to download the project again when Docker is missing. The bootstrap installer recognizes the existing Canvasly project, installs and starts Docker Desktop, and then builds the project.
+
+#### Windows: project downloaded, Docker missing
+
+1. Open the Canvasly project folder in File Explorer.
+2. Click the address bar, type `powershell`, and press Enter.
+3. Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap-windows.ps1
+```
+
+#### macOS: project downloaded, Docker missing
+
+1. Open **Terminal**.
+2. Type `cd ` (with a space after `cd`), drag the Canvasly project folder into Terminal, and press Enter.
+3. Run:
+
+```bash
+bash ./bootstrap-macos.sh
+```
+
+The scripts do not download Canvasly again. Windows may request administrator approval, enable WSL 2, or require a restart; macOS asks for your local password. If a restart is required, return to the project directory afterward and run the same command again.
+
+If the project does not contain the relevant `bootstrap-windows.ps1` or `bootstrap-macos.sh` script for your system, it is an older copy. Download the latest version from the `main` branch.
+
+#### Docker already installed
+
+Start Docker Desktop and wait until it reports that Docker is running, then run this from the project directory:
 
 ```bash
 # macOS / Linux
@@ -135,7 +185,7 @@ bash ./install.sh
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-### Start and stop it later
+### Docker: start and stop it later
 
 Start Docker Desktop and wait until it reports that Docker is running, then use the command for your platform:
 
@@ -167,7 +217,7 @@ docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
 # Windows: powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Public hosting is outside the scope of this one-command setup. Canvasly currently has no built-in account system, and projects and version history live only in the current browser session. Internet access requires authentication, HTTPS, a domain, firewall rules, and a reverse proxy at minimum, with `ALLOW_PRIVATE_LLM_ENDPOINTS=false`. Beginners should not expose this setup directly to the public internet.
+Public hosting is outside the scope of this one-command setup. Canvasly currently has no built-in account system, and Docker/browser projects and history live only in the current tab. Internet access requires authentication, HTTPS, a domain, firewall rules, and a reverse proxy at minimum, with `ALLOW_PRIVATE_LLM_ENDPOINTS=false`. Beginners should not expose this setup directly to the public internet.
 
 ### Local development
 
@@ -180,6 +230,24 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
+### Desktop development and packaging
+
+```bash
+npm run desktop:dev    # start Vite + Electron
+npm run test:desktop   # test desktop runtime and persistence
+npm run desktop:pack   # create an unpacked app for local inspection
+npm run desktop:dist   # create installers for the current platform
+```
+
+Production releases use [`.github/workflows/desktop-release.yml`](./.github/workflows/desktop-release.yml). Match the `package.json` version to a tag such as `v0.2.0` or `v0.2.0-beta.1`, then push that tag. CI builds a macOS universal DMG/ZIP, Windows x64 NSIS EXE, blockmaps, and update YAML files, and uploads them to one GitHub Release. Versions containing `-beta` are published as prereleases.
+
+Configure these GitHub Actions secrets for production signing:
+
+| Platform | Secrets |
+| --- | --- |
+| macOS | `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` |
+| Windows | `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD` |
+
 ## Connect a model
 
 Open model settings in the editor. Credentials stay in the current browser session and are sent only to the Canvasly server handling that request.
@@ -190,8 +258,8 @@ Open model settings in the editor. Credentials stay in the current browser sessi
 | Anthropic Claude | Messages API | `https://api.anthropic.com` |
 | Qwen | Chat Completions | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | DeepSeek | Chat Completions | `https://api.deepseek.com` |
-| GitHub Copilot | Responses / local bridge | `http://host.docker.internal:4141/v1` |
-| Local models | Chat Completions | `http://host.docker.internal:11434/v1` |
+| GitHub Copilot | Responses / local bridge | Desktop `http://127.0.0.1:4141/v1`; Docker `http://host.docker.internal:4141/v1` |
+| Local models | Chat Completions | Desktop `http://127.0.0.1:11434/v1`; Docker `http://host.docker.internal:11434/v1` |
 | Custom endpoint | Responses or Chat Completions | `http://127.0.0.1:4141/v1` |
 
 ### Local Custom endpoint
@@ -263,6 +331,8 @@ flowchart LR
 ## Safety model
 
 - API keys are never written to local storage, logs, or project files.
+- The desktop app binds its bundled service to a random `127.0.0.1` port and writes project state to the operating system's app-data directory.
+- Desktop updates accept GitHub Release checksum metadata; production releases should additionally rely on macOS and Windows code signing.
 - Remote model endpoints must use HTTPS.
 - The bundled Compose stack binds to `127.0.0.1` and permits trusted local/private endpoints for local use.
 - Before exposing Canvasly beyond the local machine, operators must set `ALLOW_PRIVATE_LLM_ENDPOINTS=false` and enforce outbound network policy for custom DNS hostnames.
@@ -276,13 +346,22 @@ flowchart LR
 ```text
 app/
   api/transform/route.ts   provider adapters, validation, endpoint security
+  desktop-api.ts           Electron bridge types and update state
   editor-data.ts           presets, starter HTML, prompt suggestions
   page.tsx                 canvas, collaboration modes, Agent queue, history
   globals.css              responsive workbench and interaction styling
+desktop/
+  main.mjs                 window, local server, persistence, and updater
+  preload.cjs              minimal-privilege IPC bridge
+  build.mjs                cross-platform standalone build
+  bundle.mjs               minimal Electron main-process bundle
 tools/
   copilot-bridge.mjs       optional logged-in GitHub Copilot SDK bridge
 docs/assets/               screenshots, banner, GIF, and promotional video
 worker/index.ts            Cloudflare/Vinext Worker entry
+electron-builder.yml       DMG / ZIP / NSIS and GitHub update configuration
+.github/workflows/
+  desktop-release.yml      cross-platform Release automation
 bootstrap-macos.sh         New-computer installer for macOS
 bootstrap-windows.ps1      New-computer installer for Windows
 install.sh / install.ps1   Project-local Docker installers
@@ -294,6 +373,7 @@ compose.yaml               Self-hosted services
 ```bash
 npm run lint
 npm test
+npm run test:desktop
 node --check tools/copilot-bridge.mjs
 ```
 
@@ -304,7 +384,7 @@ Start the Docker app before running E2E tests. Browser tests use an installed Mi
 ```bash
 ./install.sh
 npm run test:api       # 12 deterministic API contract cases
-npm run test:browser   # 11 deterministic UI and workflow cases
+npm run test:browser   # 12 deterministic UI and workflow cases
 npm run test:model     # 14 real local gpt-5.5 cases, including one browser flow
 npm run test:e2e       # all three suites in sequence
 ```
@@ -321,7 +401,7 @@ node --test tests/rendered-html.test.mjs
 
 ## Current scope
 
-Canvasly currently stores projects and version history in the active browser session. Refreshing returns to the starter page. Cloud project persistence, collaborative multiplayer editing, reusable component libraries, and a visual property inspector remain future work.
+The desktop app automatically stores projects and version history on the local computer. Docker/browser sessions still live only in the current tab. Cloud synchronization, collaborative multiplayer editing, reusable component libraries, and a visual property inspector remain future work.
 
 ---
 

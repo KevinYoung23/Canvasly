@@ -90,7 +90,29 @@
 
 ## 快速开始
 
-### 新电脑一键安装 — 推荐小白
+### 桌面应用 — 推荐小白
+
+从 [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases/latest) 下载自己系统的安装包：
+
+- **macOS：** 下载 `.dmg`，打开后把 Canvasly 拖入“应用程序”。同时支持 Apple 芯片和 Intel 芯片。
+- **Windows 10 / 11：** 下载名称以 `Canvasly-Setup-` 开头的 `.exe` 并双击安装。
+
+桌面版已经内置本地服务，**不需要安装 Docker、Node.js 或 Git**。项目和最多 30 个版本会自动保存在这台电脑中；API 密钥仍只保留在当前应用会话。
+
+#### 应用内更新
+
+点击顶部的更新小按钮，或打开右上角“模型设置”并在窗口底部找到 **Canvasly 桌面版**：
+
+1. 点击“检查更新”。
+2. 发现 GitHub Release 新版本后，点击下载并查看进度。
+3. 下载完成后点击“重启并安装”。
+
+Canvasly 启动后也会自动检查，并每 6 小时重新检查一次，但不会强制下载或重启。安装更新前会保存项目；Agent 正在运行或还有未确认的移动草稿时，应用会要求先处理完成。
+
+> [!IMPORTANT]
+> macOS 自动更新要求安装包经过 Apple Developer ID 签名和公证，Windows 正式包应使用代码签名证书。未签名的本地测试包可能显示系统安全警告。
+
+### Docker 一键安装 — 本机自托管
 
 下面的一条命令会自动完成这些工作：
 
@@ -123,9 +145,37 @@ curl -fL --retry 3 https://raw.githubusercontent.com/KevinYoung23/Canvasly/main/
 
 第一次下载镜像并构建通常比以后启动慢。完成后，Canvasly 会打开在 [http://localhost:4173](http://localhost:4173)。无需 API 密钥也可先选择 **Canvasly Demo** 体验；使用真实 AI 时，再到右上角的模型设置中选择服务商并填写自己的 API 密钥。当前项目和版本历史只保留在这个浏览器标签页中，刷新或关闭前请导出 HTML。
 
-### 已经下载了项目
+### Docker：已经下载了项目
 
-如果项目文件已经在电脑上，先安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，再在项目目录中执行：
+即使还没有安装 Docker，也不需要重新下载项目。引导安装器会识别当前 Canvasly 项目，自动安装并启动 Docker Desktop，然后构建项目。
+
+#### Windows：项目已有，Docker 未安装
+
+1. 在文件资源管理器中打开 Canvasly 项目文件夹。
+2. 点击地址栏，输入 `powershell`，按回车。
+3. 在打开的窗口中执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap-windows.ps1
+```
+
+#### macOS：项目已有，Docker 未安装
+
+1. 打开“终端（Terminal）”。
+2. 输入 `cd `（`cd` 后留一个空格），把 Canvasly 项目文件夹拖进终端，按回车。
+3. 执行：
+
+```bash
+bash ./bootstrap-macos.sh
+```
+
+脚本不会重复下载 Canvasly。Windows 可能要求管理员授权、启用 WSL 2 或重启；macOS 会要求输入本机密码。如果系统要求重启，重启后回到项目目录执行同一条命令即可继续。
+
+如果项目中看不到自己系统对应的 `bootstrap-windows.ps1` 或 `bootstrap-macos.sh`，说明它是旧版本，请从 `main` 分支重新下载最新版。
+
+#### Docker 已安装
+
+先启动 Docker Desktop 并等待它显示正在运行，再在项目目录中执行：
 
 ```bash
 # macOS / Linux
@@ -135,7 +185,7 @@ bash ./install.sh
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-### 再次启动与停止
+### Docker：再次启动与停止
 
 以后使用时，先打开 Docker Desktop，等待它显示正在运行，再执行对应命令：
 
@@ -167,7 +217,7 @@ docker tag public.ecr.aws/docker/library/node:22-alpine node:22-alpine
 # Windows：powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-公网部署不属于上述一键安装范围。Canvasly 当前没有内置账号系统，而且项目与版本历史只保存在当前浏览器会话中；如需让其他人通过互联网访问，至少还要配置身份验证、HTTPS、域名、防火墙和反向代理，并将 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`。不建议零基础用户直接把它暴露到公网。
+公网部署不属于上述一键安装范围。Canvasly 当前没有内置账号系统；Docker / 浏览器版本的项目与历史只保存在当前标签页中。如需让其他人通过互联网访问，至少还要配置身份验证、HTTPS、域名、防火墙和反向代理，并将 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`。不建议零基础用户直接把它暴露到公网。
 
 ### 本地开发
 
@@ -180,6 +230,24 @@ npm run dev
 
 打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。
 
+### 桌面版开发与打包
+
+```bash
+npm run desktop:dev    # 启动 Vite + Electron
+npm run test:desktop   # 桌面运行时与持久化测试
+npm run desktop:pack   # 生成未压缩应用，便于本机检查
+npm run desktop:dist   # 生成当前系统的安装包
+```
+
+生产发布由 [`.github/workflows/desktop-release.yml`](./.github/workflows/desktop-release.yml) 完成。先让 `package.json` 的版本与标签一致，再推送 `v0.2.0` 或 `v0.2.0-beta.1` 这类标签。CI 会分别构建 macOS universal DMG/ZIP、Windows x64 NSIS EXE、blockmap 和更新 YAML，并上传到同一个 GitHub Release。带 `-beta` 的版本会发布为预发布版本。
+
+正式签名需要在 GitHub Actions 中配置：
+
+| 平台 | Secrets |
+| --- | --- |
+| macOS | `MAC_CSC_LINK`、`MAC_CSC_KEY_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID` |
+| Windows | `WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD` |
+
 ## 连接模型
 
 在编辑器中打开模型设置。密钥只存在于当前浏览器会话中，并仅发送给处理本次请求的 Canvasly 服务。
@@ -190,8 +258,8 @@ npm run dev
 | Anthropic Claude | Messages API | `https://api.anthropic.com` |
 | Qwen | Chat Completions | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | DeepSeek | Chat Completions | `https://api.deepseek.com` |
-| GitHub Copilot | Responses / 本地 bridge | `http://host.docker.internal:4141/v1` |
-| 本地模型 | Chat Completions | `http://host.docker.internal:11434/v1` |
+| GitHub Copilot | Responses / 本地 bridge | 桌面 `http://127.0.0.1:4141/v1`；Docker `http://host.docker.internal:4141/v1` |
+| 本地模型 | Chat Completions | 桌面 `http://127.0.0.1:11434/v1`；Docker `http://host.docker.internal:11434/v1` |
 | 自定义节点 | Responses 或 Chat Completions | `http://127.0.0.1:4141/v1` |
 
 ### 本地 Custom endpoint
@@ -265,6 +333,8 @@ flowchart LR
 ## 安全边界
 
 - API 密钥不会写入 localStorage、日志或项目文件。
+- 桌面版只在随机 `127.0.0.1` 端口启动内置服务，项目状态写入系统应用数据目录。
+- 桌面更新只接受 GitHub Release 生成的校验元数据；正式发布应同时依赖 macOS / Windows 代码签名。
 - 远程模型节点必须使用 HTTPS。
 - 随附的 Compose 配置仅绑定 `127.0.0.1`，并允许本地使用可信的本地或私有节点。
 - 将 Canvasly 暴露到本机之外前，运维者必须设置 `ALLOW_PRIVATE_LLM_ENDPOINTS=false`，并针对自定义 DNS 域名配置出站网络策略。
@@ -278,13 +348,22 @@ flowchart LR
 ```text
 app/
   api/transform/route.ts   模型适配、结果校验、节点安全
+  desktop-api.ts           Electron 安全桥类型与更新状态
   editor-data.ts           模型预设、示例 HTML、提示建议
   page.tsx                 画布、协作模式、Agent 队列、版本历史
   globals.css              响应式工作台与交互样式
+desktop/
+  main.mjs                 桌面窗口、本地服务、持久化与更新
+  preload.cjs              最小权限 IPC 安全桥
+  build.mjs                跨平台 standalone 构建
+  bundle.mjs               精简 Electron 主进程打包
 tools/
   copilot-bridge.mjs       可选的 GitHub Copilot 登录态 bridge
 docs/assets/               截图、封面、GIF 与宣传视频
 worker/index.ts            Cloudflare/Vinext Worker 入口
+electron-builder.yml       DMG / ZIP / NSIS 打包与 GitHub 更新配置
+.github/workflows/
+  desktop-release.yml      跨平台 Release 自动构建
 bootstrap-macos.sh         macOS 新电脑一键安装
 bootstrap-windows.ps1      Windows 新电脑一键安装
 install.sh / install.ps1   项目内 Docker 安装入口
@@ -296,6 +375,7 @@ compose.yaml               自托管服务
 ```bash
 npm run lint
 npm test
+npm run test:desktop
 node --check tools/copilot-bridge.mjs
 ```
 
@@ -306,7 +386,7 @@ node --check tools/copilot-bridge.mjs
 ```bash
 ./install.sh
 npm run test:api       # 12 个确定性 API 契约 case
-npm run test:browser   # 11 个确定性 UI 与工作流 case
+npm run test:browser   # 12 个确定性 UI 与工作流 case
 npm run test:model     # 14 个真实本地 gpt-5.5 case，含一个浏览器完整链路
 npm run test:e2e       # 依次运行以上三套测试
 ```
@@ -323,7 +403,7 @@ node --test tests/rendered-html.test.mjs
 
 ## 当前范围
 
-Canvasly 目前把项目与版本历史保存在当前浏览器会话中；刷新后会回到示例页面。云端项目持久化、多人实时协作、可复用组件库和可视化属性面板属于后续方向。
+桌面版会在本机自动保存项目与版本历史，Docker / 浏览器版本仍只保存在当前标签页中。云端项目同步、多人实时协作、可复用组件库和可视化属性面板属于后续方向。
 
 ---
 

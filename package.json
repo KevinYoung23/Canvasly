@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "A visual AI workspace for discussing ideas, editing real HTML, and shipping together.",
+  "author": "KevinYoung23 and Canvasly contributors",
   "repository": {
     "type": "git",
     "url": "https://github.com/KevinYoung23/Canvasly.git"
@@ -25,7 +26,13 @@
     "build": "bash scripts/build-verified.sh",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "copilot:bridge": "node tools/copilot-bridge.mjs",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "desktop:dev": "node desktop/dev.mjs",
+    "desktop:build": "node desktop/build.mjs",
+    "desktop:bundle": "node desktop/bundle.mjs",
+    "desktop:pack": "npm run desktop:build && npm run desktop:bundle && node desktop/package.mjs --dir",
+    "desktop:dist": "npm run desktop:build && npm run desktop:bundle && node desktop/package.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/desktop-runtime.test.mjs",
+    "test:desktop": "node --test tests/desktop-runtime.test.mjs",
     "test:api": "node --test --test-concurrency=1 tests/transform-api.e2e.mjs",
     "test:browser": "node --test --test-concurrency=1 tests/browser.e2e.mjs",
     "test:model": "node --test --test-concurrency=1 tests/local-model.e2e.mjs",
@@ -37,13 +44,15 @@
   "dependencies": {
     "@github/copilot-sdk": "^1.0.9",
     "drizzle-orm": "0.45.2",
+    "electron-updater": "6.8.9",
     "lucide-react": "^0.468.0",
-    "next": "16.2.6",
+    "next": "16.3.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
+    "@electron/asar": "4.2.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
@@ -51,6 +60,9 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "playwright-core": "^1.62.1",
@@ -61,6 +73,11 @@
     "vite": "8.0.13",
     "wrangler": "4.92.0"
   },
+  "overrides": {
+    "js-yaml": "4.3.1",
+    "nanoid": "3.3.18"
+  },
+  "main": "desktop/main.mjs",
   "type": "module",
   "displayName": "Canvasly AI HTML Editor"
 }

@@ -1,0 +1,48 @@
+appId: com.canvasly.desktop
+productName: Canvasly
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+asar: true
+npmRebuild: false
+
+files:
+  - "**/*"
+
+extraResources:
+  - from: dist/canvasly-server.asar
+    to: app-server.asar
+
+directories:
+  app: .desktop-build
+  output: release
+  buildResources: build-resources
+
+publish:
+  provider: github
+  owner: KevinYoung23
+  repo: Canvasly
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build-resources/icon.icns
+  hardenedRuntime: true
+  minimumSystemVersion: "12.0"
+  target:
+    - dmg
+    - zip
+
+dmg:
+  title: Canvasly ${version}
+
+win:
+  icon: build-resources/icon.ico
+  target:
+    - nsis
+
+nsis:
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+  oneClick: true
+  perMachine: false
+  allowElevation: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false

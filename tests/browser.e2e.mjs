@@ -140,6 +140,92 @@ async function newPage(viewport = { width: 1440, height: 900 }) {
   return { context, page };
 }
 
+async function newDesktopPage(viewport = { width: 1440, height: 900 }) {
+  const context = await browser.newContext({ viewport });
+  await context.addInitScript(() => {
+    const calls = [];
+    const listeners = new Set();
+    let updateState = {
+      status: "idle",
+      currentVersion: "0.1.0",
+      message: "可以检查 GitHub Releases 中的新版本",
+    };
+    const publish = (state) => {
+      updateState = state;
+      for (const listener of listeners) listener(state);
+    };
+    Object.defineProperty(window, "__canvaslyDesktopCalls", {
+      value: calls,
+      configurable: false,
+    });
+    Object.defineProperty(window, "canvaslyDesktop", {
+      value: {
+        getInfo: async () => ({
+          version: "0.1.0",
+          platform: "darwin",
+          packaged: true,
+        }),
+        loadProject: async () => null,
+        saveProject: async (snapshot) => {
+          calls.push({ method: "saveProject", snapshot });
+          return { savedAt: "2026-08-14T00:00:00.000Z" };
+        },
+        saveProjectBeforeUnload: (snapshot) => {
+          calls.push({ method: "saveProjectBeforeUnload", snapshot });
+          return { ok: true };
+        },
+        getUpdateState: async () => updateState,
+        checkForUpdates: async () => {
+          calls.push({ method: "checkForUpdates" });
+          publish({
+            status: "available",
+            currentVersion: "0.1.0",
+            version: "0.2.0",
+            releaseNotes: "Desktop updater E2E release",
+            message: "发现 Canvasly 0.2.0",
+          });
+          return updateState;
+        },
+        downloadUpdate: async () => {
+          calls.push({ method: "downloadUpdate" });
+          publish({
+            status: "downloading",
+            currentVersion: "0.1.0",
+            version: "0.2.0",
+            percent: 50,
+            transferred: 50,
+            total: 100,
+            bytesPerSecond: 25,
+            message: "正在下载 50%",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          publish({
+            status: "downloaded",
+            currentVersion: "0.1.0",
+            version: "0.2.0",
+            releaseNotes: "Desktop updater E2E release",
+            message: "更新已下载，可以重启安装",
+          });
+          return updateState;
+        },
+        installUpdate: async () => {
+          calls.push({ method: "installUpdate" });
+          return { installing: true };
+        },
+        onUpdateState: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      },
+      configurable: false,
+    });
+  });
+  const page = await context.newPage();
+  await page.goto(canvaslyUrl, { waitUntil: "domcontentloaded" });
+  await page.locator('iframe[title="HTML 页面预览"]').waitFor();
+  return { context, page };
+}
+
 async function clickParent(page, locator) {
   await locator.evaluate((element) => element.click());
 }
@@ -189,6 +275,63 @@ test.before(async () => {
 test.after(async () => {
   await browser?.close();
   if (gateway?.listening) await new Promise((resolve) => gateway.close(resolve));
+});
+
+test("desktop updater, persistence bridge, and local endpoint defaults", async () => {
+  const { context, page } = await newDesktopPage();
+  try {
+    await page
+      .getByRole("button", { name: "桌面更新：检查更新" })
+      .waitFor();
+    await clickParent(page, page.getByRole("button", { name: "模型设置" }));
+    await page.getByText("Canvasly 桌面版").waitFor();
+    await page.getByText("当前版本 v0.1.0").waitFor();
+
+    await clickParent(page, page.getByRole("button", { name: /Local model/ }));
+    await assert.doesNotReject(async () => {
+      await page
+        .getByRole("textbox", { name: /节点地址/ })
+        .waitFor();
+    });
+    assert.equal(
+      await page.getByRole("textbox", { name: /节点地址/ }).inputValue(),
+      "http://127.0.0.1:11434/v1",
+    );
+
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "检查更新", exact: true }),
+    );
+    await page
+      .getByRole("button", { name: "下载 v0.2.0", exact: true })
+      .waitFor();
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "下载 v0.2.0", exact: true }),
+    );
+    await page
+      .getByRole("button", { name: "重启并安装", exact: true })
+      .waitFor();
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "重启并安装", exact: true }),
+    );
+
+    await page.waitForFunction(() =>
+      window.__canvaslyDesktopCalls.some(
+        (call) => call.method === "installUpdate",
+      ));
+    const calls = await page.evaluate(() => window.__canvaslyDesktopCalls);
+    assert.ok(calls.some((call) => call.method === "checkForUpdates"));
+    assert.ok(calls.some((call) => call.method === "downloadUpdate"));
+    assert.ok(calls.some((call) => call.method === "installUpdate"));
+    const saved = calls.find((call) => call.method === "saveProject");
+    assert.ok(saved, "desktop update should save the project before install");
+    assert.equal("apiKey" in saved.snapshot, false);
+    assert.equal(saved.snapshot.history.length > 0, true);
+  } finally {
+    await context.close();
+  }
 });
 
 test("semantic navigation, inert control diagnostics, and solution fill", async () => {

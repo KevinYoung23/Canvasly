@@ -1,6 +1,8 @@
 node_modules/
 .next/
 dist/
+.desktop-build/
+release/
 .wrangler/
 .sites-runtime/
 

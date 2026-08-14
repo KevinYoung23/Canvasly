@@ -9,6 +9,8 @@ fi
 
 worker="${SITES_PROJECT_ROOT}/dist/server/index.js"
 hosting="${SITES_PROJECT_ROOT}/dist/.openai/hosting.json"
+standalone_server="${SITES_PROJECT_ROOT}/dist/standalone/server.js"
+standalone_worker="${SITES_PROJECT_ROOT}/dist/standalone/dist/server/index.js"
 
 [[ -f "${worker}" ]] || {
   echo "Missing Sites Worker entry: dist/server/index.js" >&2
@@ -16,6 +18,14 @@ hosting="${SITES_PROJECT_ROOT}/dist/.openai/hosting.json"
 }
 [[ -f "${hosting}" ]] || {
   echo "Missing packaged Sites manifest: dist/.openai/hosting.json" >&2
+  exit 66
+}
+[[ -f "${standalone_server}" ]] || {
+  echo "Missing standalone server entry: dist/standalone/server.js" >&2
+  exit 66
+}
+[[ -f "${standalone_worker}" ]] || {
+  echo "Missing standalone Worker entry: dist/standalone/dist/server/index.js" >&2
   exit 66
 }
 
@@ -35,3 +45,4 @@ if (!worker.default || typeof worker.default.fetch !== "function") {
 NODE
 
 echo "Validated Sites artifact: ESM Worker default.fetch and hosting manifest are present."
+echo "Validated standalone artifact: desktop server and Worker entry are present."
