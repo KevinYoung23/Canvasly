@@ -1,6 +1,6 @@
 {
   "name": "canvasly",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "private": true,
   "description": "A visual AI workspace for discussing ideas, editing real HTML, and shipping together.",
   "author": "KevinYoung23 and Canvasly contributors",
