@@ -13,8 +13,13 @@ import {
 import electronUpdater from "electron-updater";
 import {
   DESKTOP_PROJECT_FILE_NAME,
+  DESKTOP_PREFERENCES_FILE_NAME,
   normalizeProjectSnapshot,
+  normalizeDesktopPreferences,
+  readDesktopPreferences,
   readProjectSnapshot,
+  writeDesktopPreferences,
+  writeDesktopPreferencesSync,
   writeProjectSnapshot,
   writeProjectSnapshotSync,
 } from "./project-state.mjs";
@@ -31,6 +36,11 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(moduleDirectory, "..");
 const developmentUrl = process.env.CANVASLY_DESKTOP_URL?.trim() || "";
 const smokeTest = process.argv.includes("--smoke-test");
+const userDataOverride =
+  process.env.CANVASLY_DESKTOP_USER_DATA_DIR?.trim();
+if (userDataOverride) {
+  app.setPath("userData", path.resolve(userDataOverride));
+}
 
 let mainWindow = null;
 let localServer = null;
@@ -38,6 +48,8 @@ let appOrigin = "";
 let updateTimer = null;
 let projectSaveGeneration = 0;
 let projectSaveQueue = Promise.resolve();
+let preferencesSaveGeneration = 0;
+let preferencesSaveQueue = Promise.resolve();
 let updateState = {
   status: app.isPackaged ? "idle" : "unsupported",
   currentVersion: app.getVersion(),
@@ -66,6 +78,10 @@ function projectFilePath() {
   return path.join(app.getPath("userData"), DESKTOP_PROJECT_FILE_NAME);
 }
 
+function preferencesFilePath() {
+  return path.join(app.getPath("userData"), DESKTOP_PREFERENCES_FILE_NAME);
+}
+
 function queueProjectSave(snapshot) {
   const validatedSnapshot = normalizeProjectSnapshot(snapshot);
   const generation = ++projectSaveGeneration;
@@ -83,6 +99,37 @@ function saveProjectBeforeUnload(snapshot) {
   const validatedSnapshot = normalizeProjectSnapshot(snapshot);
   projectSaveGeneration += 1;
   writeProjectSnapshotSync(projectFilePath(), validatedSnapshot);
+}
+
+function queuePreferencesSave(preferences) {
+  const validatedPreferences =
+    normalizeDesktopPreferences(preferences);
+  const generation = ++preferencesSaveGeneration;
+  const operation = preferencesSaveQueue.then(() =>
+    writeDesktopPreferences(
+      preferencesFilePath(),
+      validatedPreferences,
+      {
+        shouldCommit: () => generation === preferencesSaveGeneration,
+      },
+    ));
+  preferencesSaveQueue = operation.catch((error) => {
+    log(
+      "error",
+      `Desktop preferences save failed: ${updaterErrorMessage(error)}`,
+    );
+  });
+  return operation;
+}
+
+function savePreferencesBeforeUnload(preferences) {
+  const validatedPreferences =
+    normalizeDesktopPreferences(preferences);
+  preferencesSaveGeneration += 1;
+  writeDesktopPreferencesSync(
+    preferencesFilePath(),
+    validatedPreferences,
+  );
 }
 
 function assertTrustedSender(event) {
@@ -211,6 +258,35 @@ function registerDesktopIpc() {
       event.returnValue = { ok: false, message };
     }
   });
+  ipcMain.handle("desktop:preferences:load", async (event) => {
+    assertTrustedSender(event);
+    return readDesktopPreferences(preferencesFilePath());
+  });
+  ipcMain.handle(
+    "desktop:preferences:save",
+    async (event, preferences) => {
+      assertTrustedSender(event);
+      await queuePreferencesSave(preferences);
+      return { savedAt: new Date().toISOString() };
+    },
+  );
+  ipcMain.on(
+    "desktop:preferences:save-sync",
+    (event, preferences) => {
+      try {
+        assertTrustedSender(event);
+        savePreferencesBeforeUnload(preferences);
+        event.returnValue = { ok: true };
+      } catch (error) {
+        const message = updaterErrorMessage(error);
+        log(
+          "error",
+          `Failed to save preferences before unload: ${message}`,
+        );
+        event.returnValue = { ok: false, message };
+      }
+    },
+  );
   ipcMain.handle("desktop:update:get-state", (event) => {
     assertTrustedSender(event);
     return updateState;

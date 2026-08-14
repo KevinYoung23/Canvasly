@@ -97,7 +97,7 @@
 - **macOS：** 下载 `.dmg`，打开后把 Canvasly 拖入“应用程序”。同时支持 Apple 芯片和 Intel 芯片。
 - **Windows 10 / 11：** 下载名称以 `Canvasly-Setup-` 开头的 `.exe` 并双击安装。
 
-桌面版已经内置本地服务，**不需要安装 Docker、Node.js 或 Git**。项目和最多 30 个版本会自动保存在这台电脑中；API 密钥仍只保留在当前应用会话。
+桌面版已经内置本地服务，**不需要安装 Docker、Node.js 或 Git**。项目、最多 30 个版本，以及上次使用的服务商、协议、节点地址和模型名会自动保存在这台电脑中；API 密钥仍只保留在当前应用会话。若异常结果让画布变空，重启时会自动恢复最近的可见版本，同时保留独立的源码草稿；也可从项目菜单选择“恢复示例页面”。
 
 #### 应用内更新
 
@@ -235,6 +235,7 @@ npm run dev
 ```bash
 npm run desktop:dev    # 启动 Vite + Electron
 npm run test:desktop   # 桌面运行时与持久化测试
+npm run test:desktop-app # 真实 Electron 退出/重启恢复测试
 npm run desktop:pack   # 生成未压缩应用，便于本机检查
 npm run desktop:dist   # 生成当前系统的安装包
 ```
@@ -250,7 +251,7 @@ npm run desktop:dist   # 生成当前系统的安装包
 
 ## 连接模型
 
-在编辑器中打开模型设置。密钥只存在于当前浏览器会话中，并仅发送给处理本次请求的 Canvasly 服务。
+在编辑器中打开模型设置。桌面版会记住服务商、协议、节点地址和模型名；密钥只存在于当前应用会话中，并仅发送给处理本次请求的 Canvasly 服务。
 
 | 服务 | 协议 | 默认节点 |
 | --- | --- | --- |
@@ -385,13 +386,13 @@ node --check tools/copilot-bridge.mjs
 
 ```bash
 ./install.sh
-npm run test:api       # 12 个确定性 API 契约 case
-npm run test:browser   # 12 个确定性 UI 与工作流 case
-npm run test:model     # 14 个真实本地 gpt-5.5 case，含一个浏览器完整链路
+npm run test:api       # 16 个确定性 API 契约 case
+npm run test:browser   # 15 个确定性 UI 与工作流 case
+npm run test:model     # 19 个真实本地 gpt-5.5 场景，共 25 次请求
 npm run test:e2e       # 依次运行以上三套测试
 ```
 
-`test:model` 默认连接 `http://host.docker.internal:4141/v1` 的 Responses-compatible 服务并使用 `gpt-5.5`。可通过 `CANVASLY_MODEL_ENDPOINT` 与 `CANVASLY_MODEL` 覆盖。测试报告写入 `.sites-runtime/test-reports/local-model.json`。
+`test:model` 默认在 Docker 中连接 `http://host.docker.internal:4141/v1` 的 Responses-compatible 服务并使用 `gpt-5.5`；直接运行 standalone 时使用 `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`。测试覆盖页面创建、组件编辑、定点插入、手绘上下文、长页面、连续修改、并发、导航、安全和真实浏览器链路，报告写入 `.sites-runtime/test-reports/local-model.json`。
 
 macOS 上 `npm test` 需要 GNU `timeout`；等价的底层验证命令为：
 

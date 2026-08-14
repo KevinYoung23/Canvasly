@@ -19,6 +19,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke("desktop:project:save", snapshot),
     saveProjectBeforeUnload: (snapshot) =>
       ipcRenderer.sendSync("desktop:project:save-sync", snapshot),
+    loadPreferences: () => ipcRenderer.invoke("desktop:preferences:load"),
+    savePreferences: (preferences) =>
+      ipcRenderer.invoke("desktop:preferences:save", preferences),
+    savePreferencesBeforeUnload: (preferences) =>
+      ipcRenderer.sendSync(
+        "desktop:preferences:save-sync",
+        preferences,
+      ),
     getUpdateState: () => ipcRenderer.invoke("desktop:update:get-state"),
     checkForUpdates: () => ipcRenderer.invoke("desktop:update:check"),
     downloadUpdate: () => ipcRenderer.invoke("desktop:update:download"),

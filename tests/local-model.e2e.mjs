@@ -155,6 +155,93 @@ test("local gpt-5.5 Canvasly matrix", { timeout: 3_600_000 }, async (suite) => {
     assert.equal((payload.html.match(/Orbit Lamp/gi) || []).length, 1);
   });
 
+  await suite.test("creates a complete page from a blank document", async () => {
+    const html = `<!doctype html><html><head><title>Untitled</title></head><body></body></html>`;
+    const payload = await transform("create-complete-page", {
+      html,
+      instruction: "Create a complete responsive landing page for a collaborative research app named Fieldnote. Include a semantic header and nav, one main h1 with the exact text Research that stays connected, a feature section containing exactly three article elements, one CTA link with href=\"#start\", a target section with id=\"start\", and a footer. Use embedded CSS only and no scripts.",
+    });
+    assert.match(payload.html, /<h1[^>]*>\s*Research that stays connected\s*<\/h1>/i);
+    const features = payload.html.match(/<article\b/gi) || [];
+    assert.equal(features.length, 3);
+    assert.match(payload.html, /<a\b[^>]*href=["']#start["']/i);
+    assert.match(payload.html, /id=["']start["']/i);
+    assert.equal(hasDangerousBehavior(payload.html), false);
+  });
+
+  await suite.test("uses drawing context without changing unrelated content", async () => {
+    const html = `<!doctype html><html><body><main>
+      <section id="overview"><h2>Overview</h2><p>Keep this section exactly.</p></section>
+      <section id="insight" data-canvasly-edit-target="drawn-insight"><h2>Insight</h2><p>Old analysis.</p></section>
+    </main></body></html>`;
+    const payload = await transform("drawing-context", {
+      html,
+      instruction: "Within the hand-drawn target only, change the heading to Key insight, change the paragraph to Evidence is ready for review., and add class highlight to that section. Preserve #overview exactly.",
+      selection: {
+        type: "drawing",
+        label: "手绘标注 · section · Insight",
+        selector: "#insight",
+        html: '<section id="insight"><h2>Insight</h2><p>Old analysis.</p></section>',
+        anchors: ['[data-canvasly-edit-target="drawn-insight"]'],
+        rect: { x: 280, y: 120, width: 300, height: 180 },
+      },
+    });
+    assert.match(payload.html, /id=["']overview["'][\s\S]*?<h2>Overview<\/h2>[\s\S]*?Keep this section exactly/i);
+    assert.match(payload.html, /id=["']insight["'][^>]*class=["'][^"']*highlight[^"']*["'][\s\S]*?<h2>Key insight<\/h2>[\s\S]*?Evidence is ready for review/i);
+  });
+
+  await suite.test("edits one component in a large repeated page", async () => {
+    const cards = Array.from(
+      { length: 30 },
+      (_, index) =>
+        `<article id="card-${index + 1}"><h2>Card ${index + 1}</h2><p>Stable content ${index + 1}</p></article>`,
+    ).join("");
+    const html = `<!doctype html><html><body><main><h1>Component library</h1><section id="cards">${cards}</section></main></body></html>`;
+    const payload = await transform("large-component-page", {
+      html,
+      instruction: "Change only #card-17: set its heading to Priority card and its paragraph to Reviewed under load. Preserve all other 29 articles, their ids, headings, and paragraphs exactly.",
+    });
+    assert.match(payload.html, /id=["']card-17["'][\s\S]*?Priority card[\s\S]*?Reviewed under load/i);
+    assert.match(payload.html, /id=["']card-1["'][\s\S]*?<h2>Card 1<\/h2>[\s\S]*?Stable content 1/i);
+    assert.match(payload.html, /id=["']card-30["'][\s\S]*?<h2>Card 30<\/h2>[\s\S]*?Stable content 30/i);
+    assert.equal((payload.html.match(/<article\b/gi) || []).length, 30);
+  });
+
+  await suite.test("preserves five cumulative edits in sequence", async () => {
+    let html = `<!doctype html><html><body><main><h1>Stress workspace</h1><ol id="change-log"></ol></main></body></html>`;
+    for (let step = 1; step <= 5; step += 1) {
+      const payload = await transform(`sequential-edit-${step}`, {
+        html,
+        instruction: `Append exactly one li to #change-log with data-step="${step}" and exact text Step ${step}. Preserve every existing list item exactly and do not add any other list items.`,
+      });
+      html = payload.html;
+      for (let expected = 1; expected <= step; expected += 1) {
+        const marker = new RegExp(
+          `data-step=["']${expected}["'][^>]*>\\s*Step ${expected}\\s*<\\/li>`,
+          "i",
+        );
+        assert.match(html, marker);
+        assert.equal((html.match(new RegExp(`data-step=["']${expected}["']`, "gi")) || []).length, 1);
+      }
+    }
+  });
+
+  await suite.test("handles three independent transforms concurrently", async () => {
+    const cases = ["Alpha", "Bravo", "Charlie"];
+    const results = await Promise.all(
+      cases.map((label) =>
+        transform(`concurrent-${label.toLowerCase()}`, {
+          html: `<!doctype html><html><body><main><h1>Before ${label}</h1><p>Keep ${label}.</p></main></body></html>`,
+          instruction: `Change only the h1 to exact text After ${label}. Preserve the paragraph exactly.`,
+        })),
+    );
+    for (const [index, payload] of results.entries()) {
+      const label = cases[index];
+      assert.match(payload.html, new RegExp(`<h1>\\s*After ${label}\\s*<\\/h1>`, "i"));
+      assert.match(payload.html, new RegExp(`Keep ${label}\\.`));
+    }
+  });
+
   await suite.test("creates working semantic in-page navigation", async () => {
     const html = `<!doctype html><html><body><header><button id="pricing-control">Pricing</button></header><main><section class="plans"><h2>Plans</h2></section></main></body></html>`;
     const payload = await transform("semantic-navigation", {
@@ -309,6 +396,8 @@ test("local gpt-5.5 Canvasly matrix", { timeout: 3_600_000 }, async (suite) => {
       await page.goto(canvaslyUrl, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "模型设置" }).evaluate((button) => button.click());
       await page.getByRole("button", { name: /GitHub Copilot/ }).evaluate((button) => button.click());
+      await page.getByRole("textbox", { name: /节点地址/ }).fill(endpoint);
+      await page.getByRole("textbox", { name: /模型名称/ }).fill(model);
       await page.getByRole("button", { name: "保存连接" }).evaluate((button) => button.click());
 
       const html = `<!doctype html><html><head><style>

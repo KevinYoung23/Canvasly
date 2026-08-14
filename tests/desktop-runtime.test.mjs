@@ -5,7 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import {
   normalizeProjectSnapshot,
+  normalizeDesktopPreferences,
+  readDesktopPreferences,
   readProjectSnapshot,
+  writeDesktopPreferences,
   writeProjectSnapshot,
 } from "../desktop/project-state.mjs";
 import {
@@ -24,6 +27,17 @@ const validSnapshot = {
   codeDraft: "<!doctype html><html></html>",
   projectBaseline: "<!doctype html><html></html>",
   savedHtml: "<!doctype html><html></html>",
+  savedAt: "2026-08-14T00:00:00.000Z",
+};
+
+const validPreferences = {
+  schemaVersion: 1,
+  modelConfig: {
+    providerId: "custom",
+    protocol: "openai-responses",
+    baseUrl: "https://models.example.com/v1",
+    model: "canvasly-model",
+  },
   savedAt: "2026-08-14T00:00:00.000Z",
 };
 
@@ -97,6 +111,28 @@ test("does not commit a stale desktop project write", async () => {
   }
 });
 
+test("persists desktop endpoint preferences without API keys", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "canvasly-preferences-"));
+  const filePath = path.join(directory, "preferences.json");
+  try {
+    await writeDesktopPreferences(filePath, {
+      ...validPreferences,
+      modelConfig: {
+        ...validPreferences.modelConfig,
+        apiKey: "must-not-be-persisted",
+      },
+    });
+    const source = await readFile(filePath, "utf8");
+    assert.equal(source.includes("must-not-be-persisted"), false);
+    assert.deepEqual(
+      await readDesktopPreferences(filePath),
+      validPreferences,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects malformed desktop project snapshots", () => {
   assert.throws(
     () => normalizeProjectSnapshot({ ...validSnapshot, historyIndex: 2 }),
@@ -105,5 +141,77 @@ test("rejects malformed desktop project snapshots", () => {
   assert.throws(
     () => normalizeProjectSnapshot({ ...validSnapshot, schemaVersion: 2 }),
     /版本不受支持/,
+  );
+  assert.throws(
+    () =>
+      normalizeProjectSnapshot({
+        ...validSnapshot,
+        intentionalBlankFlags: [false, true],
+      }),
+    /空白版本标记无效/,
+  );
+  assert.throws(
+    () =>
+      normalizeDesktopPreferences({
+        ...validPreferences,
+        modelConfig: {
+          ...validPreferences.modelConfig,
+          protocol: "unsupported",
+        },
+      }),
+    /请求协议不受支持/,
+  );
+  assert.throws(
+    () =>
+      normalizeDesktopPreferences({
+        ...validPreferences,
+        modelConfig: {
+          ...validPreferences.modelConfig,
+          baseUrl: "https://user:secret@models.example.com/v1",
+        },
+      }),
+    /用户名或密码/,
+  );
+  assert.throws(
+    () =>
+      normalizeDesktopPreferences({
+        ...validPreferences,
+        modelConfig: {
+          ...validPreferences.modelConfig,
+          baseUrl: "https://models.example.com/v1?api_key=secret",
+        },
+      }),
+    /敏感查询参数/,
+  );
+  for (const key of [
+      "api_token",
+      "auth_token",
+      "access_key",
+      "client_secret",
+      "x-amz-signature",
+      "x-amz-credential",
+  ]) {
+      assert.throws(
+        () =>
+          normalizeDesktopPreferences({
+            ...validPreferences,
+            modelConfig: {
+              ...validPreferences.modelConfig,
+              baseUrl: `https://models.example.com/v1?${key}=secret`,
+            },
+          }),
+        /敏感查询参数/,
+      );
+  }
+  assert.throws(
+    () =>
+      normalizeDesktopPreferences({
+        ...validPreferences,
+        modelConfig: {
+          ...validPreferences.modelConfig,
+          baseUrl: "https://models.example.com/v1?x-api-key=secret",
+        },
+      }),
+    /敏感查询参数/,
   );
 });

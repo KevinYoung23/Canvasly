@@ -19,11 +19,11 @@ jobs:
           - name: macOS universal
             os: macos-14
             artifact: desktop-macos
-            command: npm run desktop:dist -- --mac --universal --publish never
+            command: npm run desktop:dist:mac
           - name: Windows x64
             os: windows-latest
             artifact: desktop-windows
-            command: npm run desktop:dist -- --win --x64 --publish never
+            command: npm run desktop:dist:win
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,13 @@ jobs:
             node -e "const expected=process.env.GITHUB_REF_NAME.replace(/^v/,''); const actual=require('./package.json').version; if(actual!==expected){throw new Error('package.json version '+actual+' does not match tag '+expected)}"
           fi
       - run: npm ci
+      - name: Lint and desktop runtime tests
+        run: |
+          npm run lint
+          npm run test:desktop
+      - name: Desktop restart persistence test
+        if: matrix.os == 'macos-14'
+        run: npm run test:desktop-app
       - name: Build desktop installers
         run: ${{ matrix.command }}
         env:

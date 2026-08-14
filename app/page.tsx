@@ -66,9 +66,16 @@ import {
   desktopErrorMessage,
   formatDesktopBytes,
   type DesktopInfo,
+  type DesktopPreferences,
   type DesktopProjectSnapshot,
   type DesktopUpdateState,
 } from "./desktop-api";
+import {
+  findRecoverableHistoryIndex,
+  hasRenderableBodyContent,
+  instructionAllowsBlankPage,
+  wouldReplacePageWithBlank,
+} from "./html-safety";
 
 type ToolMode = "interact" | "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
@@ -1344,6 +1351,8 @@ export default function Home() {
   const [projectName, setProjectName] = useState("Northstar landing");
   const [projectBaseline, setProjectBaseline] = useState(STARTER_HTML);
   const [savedHtml, setSavedHtml] = useState(STARTER_HTML);
+  const [intentionalBlankFlags, setIntentionalBlankFlags] =
+    useState<boolean[]>([false]);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [pendingProject, setPendingProject] = useState<ProjectReplacement | null>(null);
   const [selection, setSelection] = useState<SelectionContext | null>(null);
@@ -1373,6 +1382,10 @@ export default function Home() {
   const [desktopPersistenceError, setDesktopPersistenceError] =
     useState<string | null>(null);
   const [desktopSavedAt, setDesktopSavedAt] = useState<string | null>(null);
+  const [desktopPreferencesReady, setDesktopPreferencesReady] =
+    useState(false);
+  const [desktopPreferencesError, setDesktopPreferencesError] =
+    useState<string | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
     providerId: initialProvider.id,
     protocol: initialProvider.protocol,
@@ -1415,6 +1428,7 @@ export default function Home() {
   const promptComposingRef = useRef(false);
   const navigationIssueRef = useRef({ key: "", timestamp: 0 });
   const desktopSnapshotRef = useRef<DesktopProjectSnapshot | null>(null);
+  const desktopPreferencesRef = useRef<DesktopPreferences | null>(null);
   const desktopSaveErrorRef = useRef("");
 
   const currentHtml = history[historyIndex];
@@ -1442,15 +1456,35 @@ export default function Home() {
       codeDraft,
       projectBaseline,
       savedHtml,
+      intentionalBlankFlags,
       savedAt: new Date().toISOString(),
     }),
     [
       codeDraft,
       history,
       historyIndex,
+      intentionalBlankFlags,
       projectBaseline,
       projectName,
       savedHtml,
+    ],
+  );
+  const desktopPreferences = useMemo<DesktopPreferences>(
+    () => ({
+      schemaVersion: 1,
+      modelConfig: {
+        providerId: modelConfig.providerId,
+        protocol: modelConfig.protocol,
+        baseUrl: modelConfig.baseUrl,
+        model: modelConfig.model,
+      },
+      savedAt: new Date().toISOString(),
+    }),
+    [
+      modelConfig.baseUrl,
+      modelConfig.model,
+      modelConfig.protocol,
+      modelConfig.providerId,
     ],
   );
 
@@ -1503,26 +1537,73 @@ export default function Home() {
         setDesktopInfo(info);
         setDesktopUpdate(update);
 
-        try {
-          const snapshot = await desktop.loadProject();
-          if (disposed) return;
+        const [projectResult, preferencesResult] =
+          await Promise.allSettled([
+            desktop.loadProject(),
+            desktop.loadPreferences(),
+          ]);
+        if (disposed) return;
+
+        if (projectResult.status === "fulfilled") {
+          const snapshot = projectResult.value;
           if (snapshot) {
+            const restoredBlankFlags =
+              snapshot.intentionalBlankFlags ??
+              snapshot.history.map(() => false);
+            const recoveredIndex = findRecoverableHistoryIndex(
+              snapshot.history,
+              snapshot.historyIndex,
+              restoredBlankFlags,
+            );
             documentRevisionRef.current += 1;
             setProjectName(snapshot.projectName);
             setHistory(snapshot.history);
-            setHistoryIndex(snapshot.historyIndex);
-            setCodeDraft(snapshot.codeDraft);
+            setIntentionalBlankFlags(restoredBlankFlags);
+            setHistoryIndex(recoveredIndex);
+            setCodeDraft(
+              recoveredIndex === snapshot.historyIndex
+                ? snapshot.codeDraft
+                : snapshot.codeDraft !==
+                      snapshot.history[snapshot.historyIndex] &&
+                    hasRenderableBodyContent(snapshot.codeDraft)
+                  ? snapshot.codeDraft
+                  : snapshot.history[recoveredIndex],
+            );
             setProjectBaseline(snapshot.projectBaseline);
             setSavedHtml(snapshot.savedHtml);
             setDesktopSavedAt(snapshot.savedAt);
+            if (recoveredIndex !== snapshot.historyIndex) {
+              showToast("检测到空白画布，已恢复最近的可见版本");
+            }
           }
           setDesktopPersistenceReady(true);
-        } catch (error) {
-          if (disposed) return;
-          const message = desktopErrorMessage(error);
-          console.error("[Canvasly] Desktop project restore failed", error);
+        } else {
+          const message = desktopErrorMessage(projectResult.reason);
+          console.error(
+            "[Canvasly] Desktop project restore failed",
+            projectResult.reason,
+          );
           setDesktopPersistenceError(message);
           showToast(`桌面项目恢复失败：${message}`);
+        }
+
+        if (preferencesResult.status === "fulfilled") {
+          const preferences = preferencesResult.value;
+          if (preferences) {
+            setModelConfig({
+              ...preferences.modelConfig,
+              apiKey: "",
+            });
+          }
+          setDesktopPreferencesReady(true);
+        } else {
+          const message = desktopErrorMessage(preferencesResult.reason);
+          console.error(
+            "[Canvasly] Desktop preferences restore failed",
+            preferencesResult.reason,
+          );
+          setDesktopPreferencesError(message);
+          showToast(`模型节点恢复失败：${message}`);
         }
       } catch (error) {
         if (disposed) return;
@@ -1540,6 +1621,10 @@ export default function Home() {
   useEffect(() => {
     desktopSnapshotRef.current = desktopSnapshot;
   }, [desktopSnapshot]);
+
+  useEffect(() => {
+    desktopPreferencesRef.current = desktopPreferences;
+  }, [desktopPreferences]);
 
   useEffect(() => {
     const desktop = window.canvaslyDesktop;
@@ -1566,6 +1651,29 @@ export default function Home() {
     desktopInfo,
     desktopPersistenceReady,
     desktopSnapshot,
+    showToast,
+  ]);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (!desktop || !desktopInfo || !desktopPreferencesReady) return;
+
+    const timeout = window.setTimeout(() => {
+      void desktop
+        .savePreferences(desktopPreferences)
+        .then(() => setDesktopPreferencesError(null))
+        .catch((error: unknown) => {
+          const message = desktopErrorMessage(error);
+          console.error("[Canvasly] Desktop preferences save failed", error);
+          setDesktopPreferencesError(message);
+          showToast(`模型节点保存失败：${message}`);
+        });
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [
+    desktopInfo,
+    desktopPreferences,
+    desktopPreferencesReady,
     showToast,
   ]);
 
@@ -1599,6 +1707,43 @@ export default function Home() {
     desktopInfo,
     desktopPersistenceError,
     desktopPersistenceReady,
+  ]);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (
+      !desktop ||
+      !desktopInfo ||
+      !desktopPreferencesReady ||
+      desktopPreferencesError
+    ) {
+      return;
+    }
+    const saveBeforeUnload = () => {
+      const preferences = desktopPreferencesRef.current;
+      if (!preferences) return;
+      try {
+        const result =
+          desktop.savePreferencesBeforeUnload(preferences);
+        if (!result.ok) {
+          console.error(
+            `[Canvasly] Desktop preferences unload save failed: ${result.message}`,
+          );
+        }
+      } catch (error) {
+        console.error(
+          "[Canvasly] Desktop preferences unload save failed",
+          error,
+        );
+      }
+    };
+    window.addEventListener("beforeunload", saveBeforeUnload);
+    return () =>
+      window.removeEventListener("beforeunload", saveBeforeUnload);
+  }, [
+    desktopInfo,
+    desktopPreferencesError,
+    desktopPreferencesReady,
   ]);
 
   const chooseCoworkSuggestion = useCallback((suggestion: CoworkSuggestion) => {
@@ -1650,19 +1795,30 @@ export default function Home() {
   }, [appendModeMessage, showToast]);
 
   const commitHtml = useCallback(
-    (nextHtml: string) => {
+    (nextHtml: string, intentionalBlank = false) => {
       if (!nextHtml.trim() || nextHtml === currentHtml) return;
       documentRevisionRef.current += 1;
       const nextHistory = history.slice(0, historyIndex + 1);
+      const nextBlankFlags = intentionalBlankFlags.slice(
+        0,
+        historyIndex + 1,
+      );
       nextHistory.push(nextHtml);
+      nextBlankFlags.push(intentionalBlank);
       setHistory(nextHistory.slice(-30));
+      setIntentionalBlankFlags(nextBlankFlags.slice(-30));
       setHistoryIndex(Math.min(nextHistory.length - 1, 29));
       setCodeDraft(nextHtml);
       setSelection(null);
       setRegionRect(null);
       setDrawPoints([]);
     },
-    [currentHtml, history, historyIndex],
+    [
+      currentHtml,
+      history,
+      historyIndex,
+      intentionalBlankFlags,
+    ],
   );
 
   const undo = useCallback(() => {
@@ -2804,7 +2960,22 @@ export default function Home() {
       if (documentRevisionRef.current !== requestRevision) {
         throw new Error("生成期间画布已发生变化。已保留最新版本，本次 AI 结果未应用。");
       }
-      commitHtml(result.html);
+      if (
+        wouldReplacePageWithBlank(
+          sourceHtml,
+          result.html,
+          finalInstruction,
+        )
+      ) {
+        throw new Error(
+          "模型返回了异常空白页面，已保留当前画布。请缩小修改范围后重试。",
+        );
+      }
+      commitHtml(
+        result.html,
+        !hasRenderableBodyContent(result.html) &&
+          instructionAllowsBlankPage(finalInstruction),
+      );
       appendModeMessage(job.mode, {
         id: makeId("assistant"),
         role: "assistant",
@@ -3105,6 +3276,9 @@ export default function Home() {
     setMovePreview(null);
     setSavedMoveHtml(null);
     setHistory([replacement.html]);
+    setIntentionalBlankFlags([
+      !hasRenderableBodyContent(replacement.html),
+    ]);
     setHistoryIndex(0);
     setCodeDraft(replacement.html);
     setProjectBaseline(replacement.html);
@@ -3143,6 +3317,15 @@ export default function Home() {
       name: "未命名页面",
       detail: "空白 HTML 已准备好。描述你想创建的页面，或直接打开 HTML 源码开始编辑。",
       toast: "已新建空白页面",
+    });
+  };
+
+  const restoreStarterProject = () => {
+    requestProjectReplacement({
+      html: STARTER_HTML,
+      name: "Northstar landing",
+      detail: "示例页面已恢复。可以继续选择、圈选、移动组件或让 AI 修改。",
+      toast: "已恢复示例页面",
     });
   };
 
@@ -3193,6 +3376,9 @@ export default function Home() {
     setMovePreview(null);
     setSavedMoveHtml(null);
     setHistory([projectBaseline]);
+    setIntentionalBlankFlags([
+      !hasRenderableBodyContent(projectBaseline),
+    ]);
     setHistoryIndex(0);
     setCodeDraft(projectBaseline);
     setCoworkMessages(INITIAL_COWORK_MESSAGES);
@@ -3234,6 +3420,10 @@ export default function Home() {
               <button onClick={createBlankProject} type="button">
                 <span className="project-menu-icon"><FilePlus2 size={17} /></span>
                 <span><strong>新建空白页面</strong><small>从最小 HTML 文档开始</small></span>
+              </button>
+              <button onClick={restoreStarterProject} type="button">
+                <span className="project-menu-icon"><RotateCcw size={17} /></span>
+                <span><strong>恢复示例页面</strong><small>空白或异常时回到完整示例</small></span>
               </button>
               <button
                 onClick={() => {
@@ -3706,7 +3896,7 @@ export default function Home() {
               />
               <div className="code-footer">
                 <button className="ghost-code" onClick={() => setCodeDraft(currentHtml)} type="button"><Trash2 size={14} />放弃修改</button>
-                <button className="apply-code" onClick={() => { if (hasStagedMoves) { showToast("请先确认或放弃移动草稿"); return; } commitHtml(codeDraft); showToast("代码已应用"); }} disabled={hasStagedMoves || codeDraft === currentHtml} type="button"><Check size={14} />应用到画布</button>
+                <button className="apply-code" onClick={() => { if (hasStagedMoves) { showToast("请先确认或放弃移动草稿"); return; } commitHtml(codeDraft, !hasRenderableBodyContent(codeDraft)); showToast("代码已应用"); }} disabled={hasStagedMoves || codeDraft === currentHtml} type="button"><Check size={14} />应用到画布</button>
               </div>
             </div>
           )}

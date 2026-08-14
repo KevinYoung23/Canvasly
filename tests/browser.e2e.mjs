@@ -7,7 +7,9 @@ import { chromium } from "playwright-core";
 
 const canvaslyUrl = process.env.CANVASLY_E2E_URL || "http://127.0.0.1:4173";
 const gatewayPort = Number(process.env.CANVASLY_MOCK_PORT || 4143);
-const gatewayUrl = `http://host.docker.internal:${gatewayPort}/v1`;
+const gatewayHost =
+  process.env.CANVASLY_GATEWAY_HOST || "host.docker.internal";
+const gatewayUrl = `http://${gatewayHost}:${gatewayPort}/v1`;
 const executableCandidates = [
   process.env.PLAYWRIGHT_EXECUTABLE_PATH,
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
@@ -67,6 +69,16 @@ function gatewayResult(request) {
         { label: "改为页内导航", description: "创建真实锚点。", prompt: "请改为页内锚点导航" },
         { label: "提供目标地址", description: "补充 HTTPS URL。", prompt: "请使用这个 HTTPS 地址：" },
       ],
+    };
+  }
+  if (/E2E BLANK/.test(instruction)) {
+    return {
+      status: "completed",
+      html: "<!doctype html><html><head><style>body{background:#eee}</style></head><body></body></html>",
+      summary: "Returned an invalid blank page",
+      updates: ["Removed all visible content unexpectedly"],
+      issues: [],
+      suggestions: [],
     };
   }
 
@@ -165,13 +177,49 @@ async function newDesktopPage(viewport = { width: 1440, height: 900 }) {
           platform: "darwin",
           packaged: true,
         }),
-        loadProject: async () => null,
+        loadProject: async () => ({
+          schemaVersion: 1,
+          projectName: "Recovered desktop project",
+          history: [
+            "<!doctype html><html><body><main><h1>Saved visible page</h1></main></body></html>",
+            "<!doctype html><html><head><style>body{background:#eee}</style></head><body></body></html>",
+          ],
+          historyIndex: 1,
+          codeDraft:
+            "<!doctype html><html><head><style>body{background:#eee}</style></head><body></body></html>",
+          projectBaseline:
+            "<!doctype html><html><body><main><h1>Saved visible page</h1></main></body></html>",
+          savedHtml:
+            "<!doctype html><html><body><main><h1>Saved visible page</h1></main></body></html>",
+          savedAt: "2026-08-14T00:00:00.000Z",
+        }),
         saveProject: async (snapshot) => {
           calls.push({ method: "saveProject", snapshot });
           return { savedAt: "2026-08-14T00:00:00.000Z" };
         },
         saveProjectBeforeUnload: (snapshot) => {
           calls.push({ method: "saveProjectBeforeUnload", snapshot });
+          return { ok: true };
+        },
+        loadPreferences: async () => ({
+          schemaVersion: 1,
+          modelConfig: {
+            providerId: "custom",
+            protocol: "openai-responses",
+            baseUrl: "https://saved.example.com/v1",
+            model: "saved-model",
+          },
+          savedAt: "2026-08-14T00:00:00.000Z",
+        }),
+        savePreferences: async (preferences) => {
+          calls.push({ method: "savePreferences", preferences });
+          return { savedAt: "2026-08-14T00:00:00.000Z" };
+        },
+        savePreferencesBeforeUnload: (preferences) => {
+          calls.push({
+            method: "savePreferencesBeforeUnload",
+            preferences,
+          });
           return { ok: true };
         },
         getUpdateState: async () => updateState,
@@ -280,12 +328,23 @@ test.after(async () => {
 test("desktop updater, persistence bridge, and local endpoint defaults", async () => {
   const { context, page } = await newDesktopPage();
   try {
+    await preview(page).getByRole("heading", {
+      name: "Saved visible page",
+    }).waitFor();
     await page
       .getByRole("button", { name: "桌面更新：检查更新" })
       .waitFor();
     await clickParent(page, page.getByRole("button", { name: "模型设置" }));
     await page.getByText("Canvasly 桌面版").waitFor();
     await page.getByText("当前版本 v0.1.0").waitFor();
+    assert.equal(
+      await page.getByRole("textbox", { name: /节点地址/ }).inputValue(),
+      "https://saved.example.com/v1",
+    );
+    assert.equal(
+      await page.getByRole("textbox", { name: /模型名称/ }).inputValue(),
+      "saved-model",
+    );
 
     await clickParent(page, page.getByRole("button", { name: /Local model/ }));
     await assert.doesNotReject(async () => {
@@ -297,6 +356,15 @@ test("desktop updater, persistence bridge, and local endpoint defaults", async (
       await page.getByRole("textbox", { name: /节点地址/ }).inputValue(),
       "http://127.0.0.1:11434/v1",
     );
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "保存连接" }),
+    );
+    await page.waitForFunction(() =>
+      window.__canvaslyDesktopCalls.some(
+        (call) => call.method === "savePreferences",
+      ));
+    await clickParent(page, page.getByRole("button", { name: "模型设置" }));
 
     await clickParent(
       page,
@@ -329,6 +397,135 @@ test("desktop updater, persistence bridge, and local endpoint defaults", async (
     assert.ok(saved, "desktop update should save the project before install");
     assert.equal("apiKey" in saved.snapshot, false);
     assert.equal(saved.snapshot.history.length > 0, true);
+    const savedPreferences = calls.find(
+      (call) =>
+        call.method === "savePreferences" &&
+        call.preferences.modelConfig.baseUrl ===
+          "http://127.0.0.1:11434/v1",
+    );
+    assert.ok(savedPreferences, "desktop endpoint preferences should be saved");
+    assert.equal(
+      savedPreferences.preferences.modelConfig.baseUrl,
+      "http://127.0.0.1:11434/v1",
+    );
+    assert.equal(
+      "apiKey" in savedPreferences.preferences.modelConfig,
+      false,
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("blank model output is rejected without replacing the visible page", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const beforeVersion = await versionText(page);
+    const heading = preview(page).getByRole("heading", {
+      name: "Plan less. Go further.",
+    });
+    await heading.waitFor();
+    await submit(page, "E2E BLANK");
+    await heading.waitFor();
+    assert.equal(await versionText(page), beforeVersion);
+    await page.getByText("这次没有应用修改").last().waitFor();
+  } finally {
+    await context.close();
+  }
+});
+
+test("blank project, source editing, undo, redo, export, and starter recovery", async () => {
+  const { context, page } = await newPage();
+  try {
+    await clickParent(
+      page,
+      page.getByRole("button", { name: /Northstar landing/ }),
+    );
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "新建空白页面" }),
+    );
+    await page.getByRole("button", { name: /未命名页面/ }).waitFor();
+    assert.equal(await preview(page).locator("body").innerText(), "");
+
+    await clickParent(
+      page,
+      page.locator(".tool-rail").getByRole("button", {
+        name: "查看 HTML",
+      }),
+    );
+    const source = `<!doctype html><html><body><main><h1>Source-created page</h1><button>Ship</button></main></body></html>`;
+    await page.getByRole("textbox", { name: "HTML 源码" }).fill(source);
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "应用到画布" }),
+    );
+    await preview(page)
+      .getByRole("heading", { name: "Source-created page" })
+      .waitFor();
+
+    await clickParent(page, page.getByRole("button", { name: "撤销" }));
+    assert.equal(await preview(page).locator("body").innerText(), "");
+    await clickParent(page, page.getByRole("button", { name: "重做" }));
+    await preview(page)
+      .getByRole("heading", { name: "Source-created page" })
+      .waitFor();
+
+    const downloadPromise = page.waitForEvent("download");
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "导出 HTML" }),
+    );
+    const download = await downloadPromise;
+    assert.equal(download.suggestedFilename(), "未命名页面.html");
+    const stream = await download.createReadStream();
+    let exported = "";
+    for await (const chunk of stream) exported += chunk.toString();
+    assert.match(exported, /Source-created page/);
+
+    await clickParent(
+      page,
+      page.getByRole("button", { name: /未命名页面/ }),
+    );
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "恢复示例页面" }),
+    );
+    await preview(page)
+      .getByRole("heading", { name: "Plan less. Go further." })
+      .waitFor();
+  } finally {
+    await context.close();
+  }
+});
+
+test("drawing tool captures visual context and applies a queued edit", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "手绘标注 (B)" }),
+    );
+    const layer = page.locator(".interaction-layer");
+    const box = await layer.boundingBox();
+    assert.ok(box);
+    await page.mouse.move(box.x + 180, box.y + 180);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 300, box.y + 190, { steps: 4 });
+    await page.mouse.move(box.x + 320, box.y + 300, { steps: 4 });
+    await page.mouse.move(box.x + 190, box.y + 320, { steps: 4 });
+    await page.mouse.up();
+    await page.getByText(/手绘标注/).last().waitFor();
+
+    const beforeVersion = await versionText(page);
+    await submit(page, "E2E COMPLETE");
+    assert.notEqual(await versionText(page), beforeVersion);
+    assert.equal(
+      await preview(page).locator('[data-e2e-step="complete"]').count(),
+      1,
+    );
   } finally {
     await context.close();
   }

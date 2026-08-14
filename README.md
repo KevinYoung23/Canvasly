@@ -97,7 +97,7 @@ Download the installer for your system from [GitHub Releases](https://github.com
 - **macOS:** download the `.dmg`, open it, and drag Canvasly into Applications. Apple silicon and Intel Macs are supported.
 - **Windows 10 / 11:** download and run the `.exe` whose name starts with `Canvasly-Setup-`.
 
-The desktop app includes its local service, so **Docker, Node.js, and Git are not required**. It automatically saves the project and up to 30 versions on this computer; API keys still remain only in the current app session.
+The desktop app includes its local service, so **Docker, Node.js, and Git are not required**. It automatically saves the project, up to 30 versions, and the last provider, protocol, endpoint, and model name on this computer; API keys remain only in the current app session. If a bad result empties the canvas, startup restores the latest visible version while retaining a separate source draft. **Restore starter page** is also available in the project menu.
 
 #### In-app updates
 
@@ -235,6 +235,7 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 ```bash
 npm run desktop:dev    # start Vite + Electron
 npm run test:desktop   # test desktop runtime and persistence
+npm run test:desktop-app # test real Electron quit/restart recovery
 npm run desktop:pack   # create an unpacked app for local inspection
 npm run desktop:dist   # create installers for the current platform
 ```
@@ -250,7 +251,7 @@ Configure these GitHub Actions secrets for production signing:
 
 ## Connect a model
 
-Open model settings in the editor. Credentials stay in the current browser session and are sent only to the Canvasly server handling that request.
+Open model settings in the editor. The desktop app remembers the provider, protocol, endpoint, and model name. Credentials stay in the current app session and are sent only to the Canvasly server handling that request.
 
 | Provider | Protocol | Default endpoint |
 | --- | --- | --- |
@@ -383,13 +384,13 @@ Start the Docker app before running E2E tests. Browser tests use an installed Mi
 
 ```bash
 ./install.sh
-npm run test:api       # 12 deterministic API contract cases
-npm run test:browser   # 12 deterministic UI and workflow cases
-npm run test:model     # 14 real local gpt-5.5 cases, including one browser flow
+npm run test:api       # 16 deterministic API contract cases
+npm run test:browser   # 15 deterministic UI and workflow cases
+npm run test:model     # 19 real local gpt-5.5 scenarios, 25 requests total
 npm run test:e2e       # all three suites in sequence
 ```
 
-`test:model` expects the Responses-compatible endpoint at `http://host.docker.internal:4141/v1` with model `gpt-5.5`. Override it with `CANVASLY_MODEL_ENDPOINT` and `CANVASLY_MODEL`. The run report is written to `.sites-runtime/test-reports/local-model.json`.
+`test:model` uses the Responses-compatible endpoint at `http://host.docker.internal:4141/v1` in Docker with model `gpt-5.5`; for a directly started standalone server, set `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`. It covers page creation, component editing, exact insertion, drawing context, large pages, sequential edits, concurrency, navigation, safety, and a real browser flow. The report is written to `.sites-runtime/test-reports/local-model.json`.
 
 On macOS, `npm test` requires GNU `timeout`; the equivalent underlying validation is:
 

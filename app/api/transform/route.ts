@@ -1,5 +1,7 @@
 export const runtime = "edge";
 
+import { wouldReplacePageWithBlank } from "../../html-safety";
+
 type ProviderProtocol =
   | "openai-responses"
   | "openai-chat"
@@ -86,6 +88,8 @@ const MAX_INSTRUCTION_LENGTH = 12_000;
 const MAX_DOCUMENT_CONTEXT = 120_000;
 const MAX_IMAGE_DATA = 5_700_000;
 const MODEL_REQUEST_TIMEOUT_MS = 240_000;
+const MODEL_REQUEST_MAX_ATTEMPTS = 3;
+const MODEL_RETRY_DELAYS_MS = [400, 1_200];
 
 function jsonError(message: string, status = 400) {
   return Response.json({ error: message }, { status });
@@ -146,6 +150,33 @@ function isPrivateHostname(hostname: string) {
     return true;
   }
   return false;
+}
+
+function validatePrivateEndpointCaller(request: Request, baseUrl: string) {
+  let endpointUrl: URL;
+  try {
+    endpointUrl = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (!isPrivateHostname(endpointUrl.hostname)) return;
+
+  const appUrl = new URL(request.url);
+  if (!isPrivateHostname(appUrl.hostname)) {
+    throw new Error("私有模型节点只能从本机 Canvasly 服务访问");
+  }
+  const origin = request.headers.get("origin");
+  if (origin) {
+    let originUrl: URL;
+    try {
+      originUrl = new URL(origin);
+    } catch {
+      throw new Error("请求来源无效");
+    }
+    if (originUrl.origin !== appUrl.origin) {
+      throw new Error("请求来源与 Canvasly 服务不一致");
+    }
+  }
 }
 
 function resolveEndpoint(baseUrl: string, protocol: ProviderProtocol) {
@@ -453,9 +484,30 @@ function connectionErrorCode(error: unknown) {
 }
 
 function isRetryableConnectionError(error: unknown) {
-  return ["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN"].includes(
-    connectionErrorCode(error),
-  );
+  return [
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+    "ETIMEDOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ].includes(connectionErrorCode(error));
+}
+
+function isRetryableUpstreamStatus(status: number) {
+  return [500, 502, 503, 504].includes(status);
+}
+
+async function waitBeforeModelRetry(attempt: number) {
+  await new Promise((resolve) =>
+    setTimeout(
+      resolve,
+      MODEL_RETRY_DELAYS_MS[
+        Math.min(attempt, MODEL_RETRY_DELAYS_MS.length - 1)
+      ],
+    ));
 }
 
 function connectionErrorMessage(error: unknown) {
@@ -590,6 +642,10 @@ function parseModelResult(text: string, mode: CollaborationMode): ParsedModelRes
 }
 
 export async function POST(request: Request) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    return jsonError("请求必须使用 application/json", 415);
+  }
   const contentLength = Number(request.headers.get("content-length") || "0");
   if (contentLength > 8_000_000) {
     return jsonError("请求内容过大", 413);
@@ -623,6 +679,7 @@ export async function POST(request: Request) {
 
   let endpoint: string;
   try {
+    validatePrivateEndpointCaller(request, config.baseUrl);
     endpoint = resolveEndpoint(config.baseUrl, config.protocol);
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "模型节点不可用");
@@ -643,8 +700,14 @@ export async function POST(request: Request) {
 
   const requestBody = JSON.stringify(providerRequest.body);
   let upstream: Response | undefined;
+  let payload: unknown;
+  let payloadError: unknown;
   let connectionError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < MODEL_REQUEST_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
     try {
       upstream = await fetch(endpoint, {
         method: "POST",
@@ -653,11 +716,40 @@ export async function POST(request: Request) {
         redirect: "manual",
         signal: AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS),
       });
+      if (
+        isRetryableUpstreamStatus(upstream.status) &&
+        attempt < MODEL_REQUEST_MAX_ATTEMPTS - 1
+      ) {
+        await upstream.body?.cancel();
+        upstream = undefined;
+        await waitBeforeModelRetry(attempt);
+        continue;
+      }
+      if (upstream.status >= 300 && upstream.status < 400) {
+        break;
+      }
+      try {
+        payload = await upstream.json();
+      } catch (error) {
+        if (isRetryableConnectionError(error)) {
+          connectionError = error;
+          upstream = undefined;
+          if (attempt < MODEL_REQUEST_MAX_ATTEMPTS - 1) {
+            await waitBeforeModelRetry(attempt);
+            continue;
+          }
+          break;
+        }
+        payloadError = error;
+      }
       break;
     } catch (error) {
       connectionError = error;
-      if (attempt === 0 && isRetryableConnectionError(error)) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
+      if (
+        attempt < MODEL_REQUEST_MAX_ATTEMPTS - 1 &&
+        isRetryableConnectionError(error)
+      ) {
+        await waitBeforeModelRetry(attempt);
         continue;
       }
       break;
@@ -678,10 +770,7 @@ export async function POST(request: Request) {
     return jsonError("模型节点返回了重定向，已为安全起见停止请求", 502);
   }
 
-  let payload: unknown;
-  try {
-    payload = await upstream.json();
-  } catch {
+  if (payloadError) {
     return jsonError(`模型节点返回了非 JSON 响应（HTTP ${upstream.status}）`, 502);
   }
 
@@ -701,13 +790,21 @@ export async function POST(request: Request) {
       if ("reply" in result) {
         return jsonError("模型没有返回 Cowork 执行报告", 502);
       }
-      if (
-        result.status !== "blocked" &&
-        (typeof result.html !== "string" ||
-          result.html.length > MAX_HTML_LENGTH ||
-          !/<(?:html|body|!doctype)\b/i.test(result.html))
-      ) {
-        return jsonError("模型返回的 HTML 过大或不是完整页面", 502);
+      if (result.status !== "blocked") {
+        const resultHtml = result.html;
+        if (
+          typeof resultHtml !== "string" ||
+          resultHtml.length > MAX_HTML_LENGTH ||
+          !/<(?:html|body|!doctype)\b/i.test(resultHtml)
+        ) {
+          return jsonError("模型返回的 HTML 过大或不是完整页面", 502);
+        }
+        if (wouldReplacePageWithBlank(html, resultHtml, instruction)) {
+          return jsonError(
+            "模型返回了异常空白页面，已保留当前画布。请缩小修改范围后重试",
+            502,
+          );
+        }
       }
     }
     return Response.json(result, {

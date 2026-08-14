@@ -1,3 +1,5 @@
+import type { ProviderId, ProviderProtocol } from "./editor-data";
+
 export type DesktopPlatform = "darwin" | "win32" | "linux";
 
 export type DesktopInfo = {
@@ -37,6 +39,18 @@ export type DesktopProjectSnapshot = {
   codeDraft: string;
   projectBaseline: string;
   savedHtml: string;
+  intentionalBlankFlags?: boolean[];
+  savedAt: string;
+};
+
+export type DesktopPreferences = {
+  schemaVersion: 1;
+  modelConfig: {
+    providerId: ProviderId;
+    protocol: ProviderProtocol;
+    baseUrl: string;
+    model: string;
+  };
   savedAt: string;
 };
 
@@ -54,6 +68,13 @@ export type CanvaslyDesktopApi = {
   saveProject(snapshot: DesktopProjectSnapshot): Promise<SaveProjectResult>;
   saveProjectBeforeUnload(
     snapshot: DesktopProjectSnapshot,
+  ): SaveBeforeUnloadResult;
+  loadPreferences(): Promise<DesktopPreferences | null>;
+  savePreferences(
+    preferences: DesktopPreferences,
+  ): Promise<SaveProjectResult>;
+  savePreferencesBeforeUnload(
+    preferences: DesktopPreferences,
   ): SaveBeforeUnloadResult;
   getUpdateState(): Promise<DesktopUpdateState>;
   checkForUpdates(): Promise<DesktopUpdateState>;

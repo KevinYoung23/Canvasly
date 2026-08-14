@@ -15,11 +15,44 @@ import path from "node:path";
 
 export const DESKTOP_PROJECT_SCHEMA_VERSION = 1;
 export const DESKTOP_PROJECT_FILE_NAME = "project-state.json";
+export const DESKTOP_PREFERENCES_SCHEMA_VERSION = 1;
+export const DESKTOP_PREFERENCES_FILE_NAME = "preferences.json";
 
 const MAX_PROJECT_NAME_LENGTH = 200;
 const MAX_HISTORY_ENTRIES = 30;
 const MAX_HTML_LENGTH = 5 * 1024 * 1024;
 const MAX_TOTAL_HTML_LENGTH = 30 * 1024 * 1024;
+const MAX_ENDPOINT_LENGTH = 2_048;
+const MAX_MODEL_LENGTH = 200;
+const PROVIDER_IDS = new Set([
+  "demo",
+  "openai",
+  "anthropic",
+  "qwen",
+  "deepseek",
+  "copilot",
+  "local",
+  "custom",
+]);
+const PROVIDER_PROTOCOLS = new Set([
+  "demo",
+  "openai-responses",
+  "openai-chat",
+  "anthropic",
+]);
+const SENSITIVE_ENDPOINT_QUERY_KEYS = new Set([
+  "apikey",
+  "xapikey",
+  "authorization",
+  "accesstoken",
+  "auth",
+  "key",
+  "password",
+  "secret",
+  "sig",
+  "signature",
+  "token",
+]);
 
 function assertRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -83,6 +116,19 @@ export function normalizeProjectSnapshot(value) {
   if (totalHtmlLength > MAX_TOTAL_HTML_LENGTH) {
     throw new RangeError("桌面项目总大小超过 30 MB");
   }
+  let intentionalBlankFlags;
+  if (snapshot.intentionalBlankFlags !== undefined) {
+    if (
+      !Array.isArray(snapshot.intentionalBlankFlags) ||
+      snapshot.intentionalBlankFlags.length !== history.length ||
+      snapshot.intentionalBlankFlags.some(
+        (value) => typeof value !== "boolean",
+      )
+    ) {
+      throw new RangeError("空白版本标记无效");
+    }
+    intentionalBlankFlags = [...snapshot.intentionalBlankFlags];
+  }
 
   return {
     schemaVersion: DESKTOP_PROJECT_SCHEMA_VERSION,
@@ -92,6 +138,7 @@ export function normalizeProjectSnapshot(value) {
     codeDraft,
     projectBaseline,
     savedHtml,
+    ...(intentionalBlankFlags ? { intentionalBlankFlags } : {}),
     savedAt:
       typeof snapshot.savedAt === "string"
         ? snapshot.savedAt
@@ -99,9 +146,73 @@ export function normalizeProjectSnapshot(value) {
   };
 }
 
-function serializedSnapshot(value) {
-  const snapshot = normalizeProjectSnapshot(value);
-  return `${JSON.stringify(snapshot)}\n`;
+export function normalizeDesktopPreferences(value) {
+  const preferences = assertRecord(value);
+  if (
+    preferences.schemaVersion !== DESKTOP_PREFERENCES_SCHEMA_VERSION
+  ) {
+    throw new RangeError("桌面偏好数据版本不受支持");
+  }
+  const config = assertRecord(preferences.modelConfig);
+  const providerId = assertString(config.providerId, "模型服务", 50);
+  const protocol = assertString(config.protocol, "请求协议", 50);
+  if (!PROVIDER_IDS.has(providerId)) {
+    throw new RangeError("模型服务不受支持");
+  }
+  if (!PROVIDER_PROTOCOLS.has(protocol)) {
+    throw new RangeError("请求协议不受支持");
+  }
+  const baseUrl = assertString(
+    config.baseUrl,
+    "模型节点地址",
+    MAX_ENDPOINT_LENGTH,
+  );
+  if (baseUrl) {
+    let endpoint;
+    try {
+      endpoint = new URL(baseUrl);
+    } catch {
+      throw new TypeError("模型节点地址格式不正确");
+    }
+    if (endpoint.username || endpoint.password) {
+      throw new RangeError("包含用户名或密码的模型节点不会保存");
+    }
+    for (const key of endpoint.searchParams.keys()) {
+      const normalizedKey = key
+        .toLowerCase()
+        .replace(/[-_.]/g, "");
+      if (
+        SENSITIVE_ENDPOINT_QUERY_KEYS.has(normalizedKey) ||
+        /(?:apikey|apitoken|authtoken|accesstoken|accesskey|authkey|clientsecret|credential|password|passwd|privatekey|secret|signature|token)/.test(
+          normalizedKey,
+        )
+      ) {
+        throw new RangeError("包含敏感查询参数的模型节点不会保存");
+      }
+    }
+    if (
+      endpoint.hash &&
+      /(?:api[_-]?key|auth|password|secret|signature|token)/i.test(
+        endpoint.hash,
+      )
+    ) {
+      throw new RangeError("包含敏感片段的模型节点不会保存");
+    }
+  }
+
+  return {
+    schemaVersion: DESKTOP_PREFERENCES_SCHEMA_VERSION,
+    modelConfig: {
+      providerId,
+      protocol,
+      baseUrl,
+      model: assertString(config.model, "模型名称", MAX_MODEL_LENGTH),
+    },
+    savedAt:
+      typeof preferences.savedAt === "string"
+        ? preferences.savedAt
+        : new Date().toISOString(),
+  };
 }
 
 async function replaceFile(tempPath, destinationPath) {
@@ -149,12 +260,25 @@ export async function readProjectSnapshot(filePath) {
   return normalizeProjectSnapshot(JSON.parse(source));
 }
 
-export async function writeProjectSnapshot(
+export async function readDesktopPreferences(filePath) {
+  let source;
+  try {
+    source = await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  return normalizeDesktopPreferences(JSON.parse(source));
+}
+
+async function writeNormalizedJson(
   filePath,
-  value,
+  normalizedValue,
   { shouldCommit } = {},
 ) {
-  const source = serializedSnapshot(value);
+  const source = `${JSON.stringify(normalizedValue)}\n`;
   const directory = path.dirname(filePath);
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await mkdir(directory, { recursive: true });
@@ -170,8 +294,8 @@ export async function writeProjectSnapshot(
   }
 }
 
-export function writeProjectSnapshotSync(filePath, value) {
-  const source = serializedSnapshot(value);
+function writeNormalizedJsonSync(filePath, normalizedValue) {
+  const source = `${JSON.stringify(normalizedValue)}\n`;
   const directory = path.dirname(filePath);
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   mkdirSync(directory, { recursive: true });
@@ -181,4 +305,31 @@ export function writeProjectSnapshotSync(filePath, value) {
   } finally {
     rmSync(tempPath, { force: true });
   }
+}
+
+export function writeProjectSnapshot(filePath, value, options) {
+  return writeNormalizedJson(
+    filePath,
+    normalizeProjectSnapshot(value),
+    options,
+  );
+}
+
+export function writeProjectSnapshotSync(filePath, value) {
+  writeNormalizedJsonSync(filePath, normalizeProjectSnapshot(value));
+}
+
+export function writeDesktopPreferences(filePath, value, options) {
+  return writeNormalizedJson(
+    filePath,
+    normalizeDesktopPreferences(value),
+    options,
+  );
+}
+
+export function writeDesktopPreferencesSync(filePath, value) {
+  writeNormalizedJsonSync(
+    filePath,
+    normalizeDesktopPreferences(value),
+  );
 }

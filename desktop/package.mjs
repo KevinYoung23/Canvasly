@@ -11,6 +11,21 @@ const electronBuilderCli = path.join(
   "cli.js",
 );
 const environment = { ...process.env };
+for (const name of [
+  "CSC_LINK",
+  "CSC_KEY_PASSWORD",
+  "CSC_NAME",
+  "APPLE_ID",
+  "APPLE_APP_SPECIFIC_PASSWORD",
+  "APPLE_TEAM_ID",
+  "APPLE_API_KEY",
+  "APPLE_API_KEY_ID",
+  "APPLE_API_ISSUER",
+]) {
+  if (!environment[name]?.trim()) {
+    delete environment[name];
+  }
+}
 if (
   !environment.CSC_LINK &&
   !environment.CSC_NAME &&
