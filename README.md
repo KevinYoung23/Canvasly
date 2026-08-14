@@ -92,7 +92,7 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 
 ### Desktop app — recommended for beginners
 
-Download the installer for your system from [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases/latest):
+Download the installer for your system from [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases):
 
 - **macOS:** download the `.dmg`, open it, and drag Canvasly into Applications. Apple silicon and Intel Macs are supported.
 - **Windows 10 / 11:** download and run the `.exe` whose name starts with `Canvasly-Setup-`.

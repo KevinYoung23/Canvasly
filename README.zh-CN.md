@@ -92,7 +92,7 @@
 
 ### 桌面应用 — 推荐小白
 
-从 [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases/latest) 下载自己系统的安装包：
+从 [GitHub Releases](https://github.com/KevinYoung23/Canvasly/releases) 下载自己系统的安装包：
 
 - **macOS：** 下载 `.dmg`，打开后把 Canvasly 拖入“应用程序”。同时支持 Apple 芯片和 Intel 芯片。
 - **Windows 10 / 11：** 下载名称以 `Canvasly-Setup-` 开头的 `.exe` 并双击安装。
