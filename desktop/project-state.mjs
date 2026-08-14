@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -215,9 +216,10 @@ export function normalizeDesktopPreferences(value) {
   };
 }
 
-async function replaceFile(tempPath, destinationPath) {
+function replaceFileSync(tempPath, destinationPath) {
+  const rollbackPath = `${destinationPath}.rollback`;
   try {
-    await rename(tempPath, destinationPath);
+    renameSync(tempPath, destinationPath);
   } catch (error) {
     if (
       process.platform !== "win32" ||
@@ -226,50 +228,87 @@ async function replaceFile(tempPath, destinationPath) {
     ) {
       throw error;
     }
-    await rm(destinationPath, { force: true });
-    await rename(tempPath, destinationPath);
+    rmSync(rollbackPath, { force: true });
+    try {
+      renameSync(destinationPath, rollbackPath);
+    } catch (backupError) {
+      if (
+        backupError &&
+        typeof backupError === "object" &&
+        backupError.code === "ENOENT"
+      ) {
+        renameSync(tempPath, destinationPath);
+        return;
+      }
+      throw new AggregateError(
+        [error, backupError],
+        "无法为现有桌面状态创建回滚副本",
+      );
+    }
+    try {
+      renameSync(tempPath, destinationPath);
+    } catch (replacementError) {
+      try {
+        renameSync(rollbackPath, destinationPath);
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [replacementError, recoveryError],
+          `桌面状态替换失败，回滚副本保留在 ${rollbackPath}`,
+        );
+      }
+      throw replacementError;
+    }
   }
+  rmSync(rollbackPath, { force: true });
 }
 
-function replaceFileSync(tempPath, destinationPath) {
+async function readStateSource(filePath) {
   try {
-    renameSync(tempPath, destinationPath);
+    return await readFile(filePath, "utf8");
   } catch (error) {
     if (
-      process.platform !== "win32" ||
-      !(error && typeof error === "object") ||
-      !["EEXIST", "EPERM"].includes(error.code)
+      !error ||
+      typeof error !== "object" ||
+      error.code !== "ENOENT"
     ) {
       throw error;
     }
-    rmSync(destinationPath, { force: true });
-    renameSync(tempPath, destinationPath);
+    try {
+      await rename(`${filePath}.rollback`, filePath);
+    } catch (rollbackError) {
+      if (
+        rollbackError &&
+        typeof rollbackError === "object" &&
+        rollbackError.code === "ENOENT"
+      ) {
+        try {
+          return await readFile(filePath, "utf8");
+        } catch (retryError) {
+          if (
+            retryError &&
+            typeof retryError === "object" &&
+            retryError.code === "ENOENT"
+          ) {
+            return null;
+          }
+          throw retryError;
+        }
+      }
+      throw rollbackError;
+    }
+    return readFile(filePath, "utf8");
   }
 }
 
 export async function readProjectSnapshot(filePath) {
-  let source;
-  try {
-    source = await readFile(filePath, "utf8");
-  } catch (error) {
-    if (error && typeof error === "object" && error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
+  const source = await readStateSource(filePath);
+  if (source === null) return null;
   return normalizeProjectSnapshot(JSON.parse(source));
 }
 
 export async function readDesktopPreferences(filePath) {
-  let source;
-  try {
-    source = await readFile(filePath, "utf8");
-  } catch (error) {
-    if (error && typeof error === "object" && error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
+  const source = await readStateSource(filePath);
+  if (source === null) return null;
   return normalizeDesktopPreferences(JSON.parse(source));
 }
 
@@ -280,14 +319,14 @@ async function writeNormalizedJson(
 ) {
   const source = `${JSON.stringify(normalizedValue)}\n`;
   const directory = path.dirname(filePath);
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   await mkdir(directory, { recursive: true });
   try {
     await writeFile(tempPath, source, { encoding: "utf8", mode: 0o600 });
     if (shouldCommit && !shouldCommit()) {
       return false;
     }
-    await replaceFile(tempPath, filePath);
+    replaceFileSync(tempPath, filePath);
     return true;
   } finally {
     await rm(tempPath, { force: true });
@@ -297,7 +336,7 @@ async function writeNormalizedJson(
 function writeNormalizedJsonSync(filePath, normalizedValue) {
   const source = `${JSON.stringify(normalizedValue)}\n`;
   const directory = path.dirname(filePath);
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   mkdirSync(directory, { recursive: true });
   try {
     writeFileSync(tempPath, source, { encoding: "utf8", mode: 0o600 });

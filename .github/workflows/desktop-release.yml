@@ -41,6 +41,7 @@ jobs:
       - name: Lint and desktop runtime tests
         run: |
           npm run lint
+          npm run test:stream
           npm run test:desktop
       - name: Desktop restart persistence test
         if: matrix.os == 'macos-14'

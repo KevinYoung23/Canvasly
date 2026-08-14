@@ -2,14 +2,14 @@ export const runtime = "edge";
 
 import { wouldReplacePageWithBlank } from "../../html-safety";
 
-type ProviderProtocol =
+export type ProviderProtocol =
   | "openai-responses"
   | "openai-chat"
   | "anthropic";
 
-type CollaborationMode = "cowork" | "chat";
+export type CollaborationMode = "cowork" | "chat";
 
-type ModelConfig = {
+export type ModelConfig = {
   providerId?: string;
   protocol?: ProviderProtocol;
   baseUrl?: string;
@@ -17,7 +17,7 @@ type ModelConfig = {
   apiKey?: string;
 };
 
-type SelectionContext = {
+export type SelectionContext = {
   type?: string;
   label?: string;
   selector?: string;
@@ -47,7 +47,7 @@ type SelectionContext = {
   rect?: { x?: number; y?: number; width?: number; height?: number };
 };
 
-type Attachment = {
+export type Attachment = {
   name?: string;
   mimeType?: string;
   kind?: "image" | "document";
@@ -72,7 +72,7 @@ type CoworkSuggestion = {
   description?: string;
 };
 
-type CoworkResult = {
+export type CoworkResult = {
   status: CoworkStatus;
   html?: string;
   summary: string;
@@ -83,10 +83,10 @@ type CoworkResult = {
 
 type ParsedModelResult = { reply: string } | CoworkResult;
 
-const MAX_HTML_LENGTH = 300_000;
-const MAX_INSTRUCTION_LENGTH = 12_000;
-const MAX_DOCUMENT_CONTEXT = 120_000;
-const MAX_IMAGE_DATA = 5_700_000;
+export const MAX_HTML_LENGTH = 300_000;
+export const MAX_INSTRUCTION_LENGTH = 12_000;
+export const MAX_DOCUMENT_CONTEXT = 120_000;
+export const MAX_IMAGE_DATA = 5_700_000;
 const MODEL_REQUEST_TIMEOUT_MS = 240_000;
 const MODEL_REQUEST_MAX_ATTEMPTS = 3;
 const MODEL_RETRY_DELAYS_MS = [400, 1_200];
@@ -152,7 +152,7 @@ function isPrivateHostname(hostname: string) {
   return false;
 }
 
-function validatePrivateEndpointCaller(request: Request, baseUrl: string) {
+export function validatePrivateEndpointCaller(request: Request, baseUrl: string) {
   let endpointUrl: URL;
   try {
     endpointUrl = new URL(baseUrl);
@@ -179,7 +179,7 @@ function validatePrivateEndpointCaller(request: Request, baseUrl: string) {
   }
 }
 
-function resolveEndpoint(baseUrl: string, protocol: ProviderProtocol) {
+export function resolveEndpoint(baseUrl: string, protocol: ProviderProtocol) {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -226,7 +226,7 @@ function resolveEndpoint(baseUrl: string, protocol: ProviderProtocol) {
   return url.toString();
 }
 
-function buildSystemPrompt(mode: CollaborationMode) {
+export function buildSystemPrompt(mode: CollaborationMode) {
   if (mode === "chat") {
     return `You are Canvasly Chat, a thoughtful design and product collaborator.
 
@@ -269,7 +269,7 @@ For blocked work, omit html and return ONLY valid JSON in this shape:
 {"status":"blocked","summary":"Concise Chinese explanation","updates":[],"issues":["Concrete reason or conflict"],"suggestions":[{"label":"Short option label","description":"What this option changes","prompt":"Complete follow-up instruction"}]}`;
 }
 
-function buildUserPrompt(
+export function buildUserPrompt(
   html: string,
   instruction: string,
   selection: SelectionContext | null,
@@ -319,7 +319,7 @@ ${html}
 </canvasly_html>`;
 }
 
-function imagePartsForChat(attachments: Attachment[]) {
+export function imagePartsForChat(attachments: Attachment[]) {
   return attachments
     .filter(
       (attachment) =>
@@ -333,7 +333,7 @@ function imagePartsForChat(attachments: Attachment[]) {
     }));
 }
 
-function imagePartsForResponses(attachments: Attachment[]) {
+export function imagePartsForResponses(attachments: Attachment[]) {
   return attachments
     .filter(
       (attachment) =>
@@ -347,7 +347,7 @@ function imagePartsForResponses(attachments: Attachment[]) {
     }));
 }
 
-function imagePartsForAnthropic(attachments: Attachment[]) {
+export function imagePartsForAnthropic(attachments: Attachment[]) {
   return attachments.flatMap((attachment) => {
     if (
       attachment.kind !== "image" ||
@@ -447,7 +447,7 @@ function buildProviderRequest(
   };
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
@@ -483,7 +483,7 @@ function connectionErrorCode(error: unknown) {
   return typeof cause?.code === "string" ? cause.code : "";
 }
 
-function isRetryableConnectionError(error: unknown) {
+export function isRetryableConnectionError(error: unknown) {
   return [
     "ECONNREFUSED",
     "ECONNRESET",
@@ -496,7 +496,7 @@ function isRetryableConnectionError(error: unknown) {
   ].includes(connectionErrorCode(error));
 }
 
-function isRetryableUpstreamStatus(status: number) {
+export function isRetryableUpstreamStatus(status: number) {
   return [500, 502, 503, 504].includes(status);
 }
 
@@ -510,17 +510,17 @@ async function waitBeforeModelRetry(attempt: number) {
     ));
 }
 
-function connectionErrorMessage(error: unknown) {
+export function connectionErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "网络请求失败";
   const code = connectionErrorCode(error);
   return code ? `${message} (${code})` : message;
 }
 
-function isConnectionTimeout(error: unknown) {
+export function isConnectionTimeout(error: unknown) {
   return error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name);
 }
 
-function extractText(payload: unknown, protocol: ProviderProtocol) {
+export function extractText(payload: unknown, protocol: ProviderProtocol) {
   const root = asRecord(payload);
   if (!root) return "";
 
@@ -567,7 +567,7 @@ function extractText(payload: unknown, protocol: ProviderProtocol) {
   return "";
 }
 
-function parseModelResult(text: string, mode: CollaborationMode): ParsedModelResult {
+export function parseModelResult(text: string, mode: CollaborationMode): ParsedModelResult {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
@@ -639,6 +639,32 @@ function parseModelResult(text: string, mode: CollaborationMode): ParsedModelRes
     };
   }
   throw new Error("模型返回格式无法解析，请换一个模型或重试");
+}
+
+export function validateCoworkResult(
+  result: ParsedModelResult,
+  currentHtml: string,
+  instruction: string,
+): CoworkResult {
+  if ("reply" in result) {
+    throw new Error("模型没有返回 Cowork 执行报告");
+  }
+  if (result.status !== "blocked") {
+    const resultHtml = result.html;
+    if (
+      typeof resultHtml !== "string" ||
+      resultHtml.length > MAX_HTML_LENGTH ||
+      !/<(?:html|body|!doctype)\b/i.test(resultHtml)
+    ) {
+      throw new Error("模型返回的 HTML 过大或不是完整页面");
+    }
+    if (wouldReplacePageWithBlank(currentHtml, resultHtml, instruction)) {
+      throw new Error(
+        "模型返回了异常空白页面，已保留当前画布。请缩小修改范围后重试",
+      );
+    }
+  }
+  return result;
 }
 
 export async function POST(request: Request) {
@@ -786,27 +812,7 @@ export async function POST(request: Request) {
 
   try {
     const result = parseModelResult(extractText(payload, config.protocol), mode);
-    if (mode === "cowork") {
-      if ("reply" in result) {
-        return jsonError("模型没有返回 Cowork 执行报告", 502);
-      }
-      if (result.status !== "blocked") {
-        const resultHtml = result.html;
-        if (
-          typeof resultHtml !== "string" ||
-          resultHtml.length > MAX_HTML_LENGTH ||
-          !/<(?:html|body|!doctype)\b/i.test(resultHtml)
-        ) {
-          return jsonError("模型返回的 HTML 过大或不是完整页面", 502);
-        }
-        if (wouldReplacePageWithBlank(html, resultHtml, instruction)) {
-          return jsonError(
-            "模型返回了异常空白页面，已保留当前画布。请缩小修改范围后重试",
-            502,
-          );
-        }
-      }
-    }
+    if (mode === "cowork") validateCoworkResult(result, html, instruction);
     return Response.json(result, {
       headers: { "cache-control": "no-store" },
     });

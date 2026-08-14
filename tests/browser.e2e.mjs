@@ -50,12 +50,79 @@ function parseGatewayRequest(payload) {
   return { system, user, instruction, html };
 }
 
+function isExecutionGatewayRequest(request) {
+  return (
+    !/unified coding-agent conversation/i.test(request.system) &&
+    !/mission planner/i.test(request.system)
+  );
+}
+
 function injectBeforeBodyEnd(html, markup) {
   return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${markup}</body>`) : `${html}${markup}`;
 }
 
 function gatewayResult(request) {
   const { system, instruction } = request;
+  if (/unified coding-agent conversation/i.test(system)) {
+    const action = /E2E (?:AUTO )?CHAT|what|why|how|建议|讨论|聊聊/i.test(
+      instruction,
+    )
+      ? "chat"
+      : /E2E AUTO PLAN|只规划|先规划/i.test(instruction)
+        ? "plan"
+        : "agent";
+    return {
+      action,
+      summary:
+        action === "chat"
+          ? "Answer in the conversation without editing."
+          : action === "plan"
+            ? "Create a plan without editing."
+            : "Execute the requested page change.",
+    };
+  }
+  if (/mission planner/i.test(system)) {
+    return {
+      strategy: "mission",
+      objective: "Improve the whole page for clarity and conversion.",
+      summary: "Audit hierarchy, strengthen the primary action, and align the visual system.",
+      assumptions: ["Preserve the existing brand and unrelated content."],
+      steps: [
+        {
+          id: "step-1",
+          title: "Clarify hierarchy",
+          description: "Strengthen the headline and content grouping.",
+        },
+        {
+          id: "step-2",
+          title: "Improve conversion",
+          description: "Make the primary action easier to understand.",
+        },
+      ],
+      acceptanceCriteria: [
+        "The page has a clear primary message.",
+        "The primary action is visually prominent.",
+      ],
+      openQuestions: [],
+    };
+  }
+  if (/handoff card/i.test(system)) {
+    return {
+      title: "Approved launch direction",
+      objective: "Turn the Chat discussion into an executable page update.",
+      decisions: ["Keep the current hero", "Add one execution marker"],
+      references: [
+        {
+          title: "Canvasly source",
+          url: "https://example.com/canvasly",
+          note: "Reference from the Chat discussion.",
+        },
+      ],
+      constraints: ["Do not remove unrelated content"],
+      openQuestions: [],
+      instruction: "E2E COMPLETE",
+    };
+  }
   if (/Canvasly Chat/.test(system)) {
     return { reply: `Mock advisory reply for ${instruction}` };
   }
@@ -127,7 +194,92 @@ async function startGateway() {
     const payload = JSON.parse(body || "{}");
     const parsed = parseGatewayRequest(payload);
     gatewayRequests.push({ ...parsed, receivedAt: Date.now() });
-    if (/E2E FIRST/.test(parsed.instruction)) {
+    const streamResponses = async ({
+      chunks,
+      delay = 80,
+      citation,
+    }) => {
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      for (const chunk of chunks) {
+        if (response.destroyed || response.writableEnded) return;
+        response.write(
+          `event: response.output_text.delta\ndata: ${JSON.stringify({
+            type: "response.output_text.delta",
+            delta: chunk,
+          })}\n\n`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      if (citation && !response.destroyed && !response.writableEnded) {
+        response.write(
+          `event: response.output_text.annotation.added\ndata: ${JSON.stringify({
+            type: "response.output_text.annotation.added",
+            annotation: {
+              type: "url_citation",
+              url: citation.url,
+              title: citation.title,
+              content: citation.snippet,
+            },
+          })}\n\n`,
+        );
+      }
+      if (!response.destroyed && !response.writableEnded) {
+        response.end(
+          'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+        );
+      }
+    };
+    if (
+      /E2E CHAT STREAM/.test(parsed.instruction) &&
+      /Canvasly Chat/i.test(parsed.system)
+    ) {
+      await streamResponses({
+        chunks: ["Partial streamed answer. ", "This should not arrive after stop."],
+        delay: 500,
+      });
+      return;
+    }
+    if (
+      /E2E CHAT SEARCH/.test(parsed.instruction) &&
+      /Canvasly Chat/i.test(parsed.system)
+    ) {
+      await streamResponses({
+        chunks: ["Search-backed answer with a source."],
+        citation: {
+          title: "Example research",
+          url: "https://example.com/research",
+          snippet: "Verified reference",
+        },
+      });
+      return;
+    }
+    if (/E2E SLOW COWORK/.test(parsed.instruction)) {
+      const result = JSON.stringify({
+        status: "completed",
+        html: injectBeforeBodyEnd(
+          parsed.html,
+          '<div data-e2e-step="slow">SLOW</div>',
+        ),
+        summary: "Slow update completed",
+        updates: ["Added slow marker"],
+        issues: [],
+        suggestions: [],
+      });
+      await streamResponses({
+        chunks: [result.slice(0, 80), result.slice(80)],
+        delay: 650,
+      });
+      return;
+    }
+    if (
+      /E2E SLOW MISSION/.test(parsed.instruction) &&
+      /mission planner/i.test(parsed.system)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+    } else if (/E2E FIRST/.test(parsed.instruction)) {
       await new Promise((resolve) => setTimeout(resolve, 700));
     } else {
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -201,6 +353,68 @@ async function newDesktopPage(viewport = { width: 1440, height: 900 }) {
           calls.push({ method: "saveProjectBeforeUnload", snapshot });
           return { ok: true };
         },
+        loadCollaboration: async () => null,
+        saveCollaboration: async (state) => {
+          calls.push({ method: "saveCollaboration", state });
+          return { savedAt: "2026-08-14T00:00:00.000Z" };
+        },
+        saveCollaborationBeforeUnload: (state) => {
+          calls.push({
+            method: "saveCollaborationBeforeUnload",
+            state,
+          });
+          return { ok: true };
+        },
+        getCredentialStatus: async (slot) => ({
+          ok: true,
+          slot,
+          available: true,
+          exists: false,
+        }),
+        readCredential: async (slot) => ({
+          ok: true,
+          slot,
+          value: null,
+        }),
+        writeCredential: async (slot, value) => {
+          calls.push({ method: "writeCredential", slot, value });
+          return { ok: true, slot, exists: true };
+        },
+        clearCredential: async (slot) => {
+          calls.push({ method: "clearCredential", slot });
+          return { ok: true, slot, exists: false };
+        },
+        storeCollaborationAttachment: async (attachment) => {
+          calls.push({
+            method: "storeCollaborationAttachment",
+            attachment,
+          });
+          return {
+            ok: true,
+            attachment: {
+              ...attachment,
+              sizeBytes:
+                attachment.kind === "document"
+                  ? new TextEncoder().encode(attachment.text).byteLength
+                  : attachment.sizeBytes,
+              reference:
+                "canvasly-attachment:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+          };
+        },
+        readCollaborationAttachment: async (reference) => ({
+          ok: false,
+          error: {
+            code: "attachment-not-found",
+            message: `Missing ${reference}`,
+          },
+          queueMustRemainPaused: true,
+        }),
+        deleteCollaborationAttachment: async (reference) => ({
+          ok: true,
+          reference,
+          deleted: true,
+        }),
         loadPreferences: async () => ({
           schemaVersion: 1,
           modelConfig: {
@@ -278,6 +492,10 @@ async function clickParent(page, locator) {
   await locator.evaluate((element) => element.click());
 }
 
+function coworkPane(page) {
+  return page.locator(".cowork-pane");
+}
+
 async function configureMock(page) {
   await clickParent(page, page.getByRole("button", { name: "模型设置" }));
   await clickParent(page, page.getByRole("button", { name: /Custom endpoint/ }));
@@ -288,11 +506,15 @@ async function configureMock(page) {
 }
 
 async function submit(page, instruction, timeout = 30_000) {
-  const composer = page.locator(".composer textarea");
+  const pane = coworkPane(page);
+  const composer = pane.locator(".composer textarea");
   await composer.fill(instruction);
-  await clickParent(page, page.getByRole("button", { name: "发送", exact: true }));
-  await page.locator(".message.working").waitFor({ state: "visible", timeout });
-  await page.locator(".message.working").waitFor({ state: "hidden", timeout });
+  await clickParent(
+    page,
+    pane.getByRole("button", { name: "发送" }),
+  );
+  await pane.locator(".message.working").waitFor({ state: "visible", timeout });
+  await pane.locator(".message.working").waitFor({ state: "hidden", timeout });
 }
 
 function preview(page) {
@@ -417,6 +639,321 @@ test("desktop updater, persistence bridge, and local endpoint defaults", async (
   }
 });
 
+test("desktop truncates large documents before persisting their byte size", async () => {
+  const { context, page } = await newDesktopPage();
+  try {
+    const source = "资料".repeat(80_000);
+    await page
+      .locator('input[accept*=".txt"]')
+      .setInputFiles({
+        name: "large-reference.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from(source),
+      });
+    await page.waitForFunction(() =>
+      window.__canvaslyDesktopCalls.some(
+        (call) => call.method === "storeCollaborationAttachment",
+      ),
+    );
+    const call = await page.evaluate(() =>
+      window.__canvaslyDesktopCalls.find(
+        (item) => item.method === "storeCollaborationAttachment",
+      ),
+    );
+    assert.equal(call.attachment.text.length, 120_000);
+    assert.equal(
+      call.attachment.sizeBytes,
+      Buffer.byteLength(call.attachment.text, "utf8"),
+    );
+    assert.ok(
+      call.attachment.sizeBytes <
+        Buffer.byteLength(source, "utf8"),
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("one Agent conversation can plan, discuss, and execute", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const agent = coworkPane(page);
+    const beforeBox = await agent.boundingBox();
+    assert.ok(beforeBox);
+    const resizer = page.locator(".dock-edge-resizer");
+    const resizerBox = await resizer.boundingBox();
+    assert.ok(resizerBox);
+    await page.mouse.move(
+      resizerBox.x + resizerBox.width / 2,
+      resizerBox.y + 100,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      resizerBox.x - 55,
+      resizerBox.y + 100,
+      { steps: 4 },
+    );
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    assert.ok((await agent.boundingBox()).width > beforeBox.width);
+
+    const beforeVersion = await versionText(page);
+    await agent
+      .locator(".composer textarea")
+      .fill("E2E AUTO CHAT：这个页面目前有什么问题？");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await agent
+      .getByText(/Mock advisory reply for E2E AUTO CHAT/)
+      .waitFor();
+    assert.equal(await versionText(page), beforeVersion);
+
+    await clickParent(
+      page,
+      agent
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Agent" }),
+    );
+    await agent.locator(".composer textarea").fill("E2E COMPLETE");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await preview(page)
+      .locator('[data-e2e-step="complete"]')
+      .waitFor();
+    assert.ok(await agent.locator(".message.user").count() >= 2);
+  } finally {
+    await context.close();
+  }
+});
+
+test("stopping Agent preserves partial text or checkpoint and pauses queue", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const agent = coworkPane(page);
+    const beforeVersion = await versionText(page);
+    await clickParent(
+      page,
+      agent
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Agent" }),
+    );
+    await agent
+      .locator(".composer textarea")
+      .fill("E2E SLOW COWORK");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await agent.locator(".message.working").waitFor();
+    await agent.locator(".composer textarea").fill("E2E COMPLETE");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "加入队列" }),
+    );
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "停止当前任务" }).last(),
+    );
+    await agent.getByText("任务已停止").waitFor();
+    await agent
+      .getByText(/队列已暂停 · 1 项待办/)
+      .waitFor();
+    assert.equal(await versionText(page), beforeVersion);
+    assert.equal(
+      await preview(page).locator('[data-e2e-step="slow"]').count(),
+      0,
+    );
+
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "继续" }),
+    );
+    await preview(page)
+      .locator('[data-e2e-step="complete"]')
+      .waitFor();
+
+    await clickParent(
+      page,
+      agent
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Auto" }),
+    );
+    await agent
+      .locator(".composer textarea")
+      .fill("E2E CHAT STREAM");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await agent.getByText(/Partial streamed answer/).waitFor();
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "停止当前任务" }).last(),
+    );
+    await agent.getByText(/已停止 · 保留已生成内容/).waitFor();
+    await page.waitForTimeout(700);
+    assert.equal(
+      await agent.getByText(/This should not arrive/).count(),
+      0,
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("Auto research and Agent execution share one conversation", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const agent = coworkPane(page);
+    await agent.locator(".composer textarea").fill("E2E CHAT SEARCH");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await agent
+      .getByRole("link", { name: /Example research/ })
+      .waitFor();
+    await clickParent(
+      page,
+      agent
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Agent" }),
+    );
+    await agent.locator(".composer textarea").fill("E2E COMPLETE");
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "发送" }),
+    );
+    await preview(page)
+      .locator('[data-e2e-step="complete"]')
+      .waitFor();
+    assert.ok(await agent.locator(".message.user").count() >= 2);
+  } finally {
+    await context.close();
+  }
+});
+
+test("unified collaboration sidebar can collapse, reopen, and resize", async () => {
+  const { context, page } = await newPage();
+  try {
+    const agent = coworkPane(page);
+    const before = await agent.boundingBox();
+    assert.ok(before);
+    const resizer = page.locator(".dock-edge-resizer");
+    const box = await resizer.boundingBox();
+    assert.ok(box);
+    await page.mouse.move(box.x + 2, box.y + 120);
+    await page.mouse.down();
+    await page.mouse.move(box.x - 50, box.y + 120, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    assert.ok((await agent.boundingBox()).width > before.width);
+    await clickParent(
+      page,
+      agent.getByRole("button", { name: "折叠协作侧栏" }),
+    );
+    await agent.waitFor({ state: "hidden" });
+    await clickParent(
+      page,
+      page.getByRole("button", { name: "打开协作面板" }),
+    );
+    await agent.waitFor({ state: "visible" });
+  } finally {
+    await context.close();
+  }
+});
+
+test("Cowork Auto plans broad goals while Direct skips planning", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const cowork = coworkPane(page);
+    await cowork
+      .locator(".composer textarea")
+      .fill("整体优化这个页面，让它更专业并提升转化");
+    await clickParent(
+      page,
+      cowork.getByRole("button", { name: "发送" }),
+    );
+    await cowork.getByText("规划执行").waitFor();
+    await cowork.getByText("Clarify hierarchy").waitFor();
+    await cowork
+      .locator(".message.working")
+      .waitFor({ state: "hidden" });
+    assert.ok(
+      gatewayRequests.some((request) =>
+        /mission planner/i.test(request.system),
+      ),
+    );
+
+    const plannerCount = gatewayRequests.filter((request) =>
+      /mission planner/i.test(request.system),
+    ).length;
+    await submit(page, "Change the heading to Direct mode");
+    assert.equal(
+      gatewayRequests.filter((request) =>
+        /mission planner/i.test(request.system),
+      ).length,
+      plannerCount,
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("stopping Cowork during mission planning preserves the checkpoint", async () => {
+  const { context, page } = await newPage();
+  try {
+    await configureMock(page);
+    const cowork = coworkPane(page);
+    const beforeVersion = await versionText(page);
+    await cowork
+      .locator(".composer textarea")
+      .fill("E2E SLOW MISSION：整体改版这个页面并提升转化");
+    await clickParent(
+      page,
+      cowork.getByRole("button", { name: "发送" }),
+    );
+    await cowork
+      .locator(".stream-phase")
+      .filter({ hasText: /^正在制定可执行任务计划$/ })
+      .waitFor();
+    await clickParent(
+      page,
+      cowork.getByRole("button", { name: "停止当前任务" }).last(),
+    );
+    await cowork.getByText("任务已停止").waitFor();
+    assert.equal(await versionText(page), beforeVersion);
+  } finally {
+    await context.close();
+  }
+});
+
+test("responsive unified Agent sidebar remains usable on tablet", async () => {
+  const { context, page } = await newPage({
+    width: 820,
+    height: 900,
+  });
+  try {
+    assert.equal(await coworkPane(page).isVisible(), true);
+    const modeGroup = coworkPane(page).getByRole("group", {
+      name: "协作模式",
+    });
+    await modeGroup.getByRole("button", { name: "Auto" }).waitFor();
+    await modeGroup.getByRole("button", { name: "Plan" }).waitFor();
+    await modeGroup.getByRole("button", { name: "Agent" }).waitFor();
+  } finally {
+    await context.close();
+  }
+});
+
 test("blank model output is rejected without replacing the visible page", async () => {
   const { context, page } = await newPage();
   try {
@@ -429,7 +966,7 @@ test("blank model output is rejected without replacing the visible page", async 
     await submit(page, "E2E BLANK");
     await heading.waitFor();
     assert.equal(await versionText(page), beforeVersion);
-    await page.getByText("这次没有应用修改").last().waitFor();
+    await page.getByText("这次没有完成").last().waitFor();
   } finally {
     await context.close();
   }
@@ -556,7 +1093,10 @@ test("semantic navigation, inert control diagnostics, and solution fill", async 
     await page.getByText("导航需要补充配置").waitFor();
     assert.match(await page.locator(".cowork-report-issues").innerText(), /没有 href|不会执行 onclick/);
     await clickParent(page, page.getByRole("button", { name: /改为页内导航/ }));
-    assert.match(await page.getByRole("textbox", { name: "描述你想要的页面修改…" }).inputValue(), /<a href="#目标-id">/);
+    assert.match(
+      await coworkPane(page).locator(".composer textarea").inputValue(),
+      /<a href="#目标-id">/,
+    );
   } finally {
     await context.close();
   }
@@ -574,7 +1114,7 @@ test("completed, partial, and blocked reports manage versions correctly", async 
 
     await submit(page, "E2E COMPLETE");
     assert.match(await versionText(page), /2 \/ 2/);
-    await page.getByText("更新已完成", { exact: true }).waitFor();
+    await page.getByText("页面更新已完成", { exact: true }).waitFor();
     assert.match(await page.locator(".cowork-report.completed").innerText(), /Added COMPLETE marker/);
 
     await submit(page, "E2E PARTIAL");
@@ -592,40 +1132,62 @@ test("Steer runs before Queue and every job receives the latest HTML", async () 
   const { context, page } = await newPage();
   try {
     await configureMock(page);
-    const composer = page.getByRole("textbox", { name: "描述你想要的页面修改…" });
+    const pane = coworkPane(page);
+    const composer = pane.locator(".composer textarea");
     await composer.fill("E2E FIRST");
-    await clickParent(page, page.getByRole("button", { name: "发送", exact: true }));
-    await page.locator(".message.working").waitFor();
+    await clickParent(page, pane.getByRole("button", { name: "发送" }));
+    await pane.locator(".message.working").waitFor();
 
     await composer.fill("E2E QUEUE");
-    await clickParent(page, page.getByRole("button", { name: "加入队列" }));
+    await clickParent(page, pane.getByRole("button", { name: "加入队列" }));
     await composer.fill("E2E STEER");
-    await clickParent(page, page.getByRole("button", { name: "优先跟进" }));
+    await clickParent(page, pane.getByRole("button", { name: "优先跟进" }));
 
     await page.waitForFunction(() => !document.querySelector(".message.working") && !document.querySelector(".active-agent-job") && !document.querySelector(".queued-agent-job"), null, { timeout: 30_000 });
     assert.match(await versionText(page), /4 \/ 4/);
-    const queueRequests = gatewayRequests.filter((item) => /E2E (FIRST|STEER|QUEUE)/.test(item.instruction));
+    const queueRequests = gatewayRequests.filter(
+      (item) =>
+        isExecutionGatewayRequest(item) &&
+        /E2E (FIRST|STEER|QUEUE)/.test(item.instruction),
+    );
     assert.deepEqual(queueRequests.map((item) => item.instruction.split("\n")[0]), ["E2E FIRST", "E2E STEER", "E2E QUEUE"]);
     assert.match(queueRequests[1].html, /data-e2e-step="first"/);
     assert.match(queueRequests[2].html, /data-e2e-step="first"/);
     assert.match(queueRequests[2].html, /data-e2e-step="steer"/);
     assert.equal(await preview(page).locator('[data-e2e-step="queue"]').count(), 1);
+    const steerRouter = gatewayRequests.find(
+      (item) =>
+        /unified coding-agent conversation/i.test(item.system) &&
+        /E2E STEER/.test(item.user),
+    );
+    assert.ok(steerRouter);
+    assert.doesNotMatch(
+      steerRouter.user,
+      /E2E QUEUE/,
+      "Steer must not receive still-queued instructions as prior context",
+    );
   } finally {
     await context.close();
   }
 });
 
-test("Chat stays advisory and does not create a version", async () => {
+test("Plan stays advisory and does not create a version", async () => {
   const { context, page } = await newPage();
   try {
     await configureMock(page);
-    await clickParent(page, page.getByRole("button", { name: "Chat", exact: true }));
-    const composer = page.getByRole("textbox", { name: "讨论页面、内容、方向或实现取舍…" });
+    const pane = coworkPane(page);
+    await clickParent(
+      page,
+      pane
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Plan" }),
+    );
+    const composer = pane.locator(".composer textarea");
     await composer.fill("E2E CHAT");
-    await clickParent(page, page.getByRole("button", { name: "发送", exact: true }));
-    await page.locator(".message.working").waitFor({ state: "visible" });
-    await page.locator(".message.working").waitFor({ state: "hidden" });
-    await page.getByText(/Mock advisory reply for E2E CHAT/).waitFor();
+    await clickParent(page, pane.getByRole("button", { name: "发送" }));
+    await pane.locator(".message.streaming").waitFor({ state: "visible" });
+    await pane.locator(".message.streaming").waitFor({ state: "hidden" });
+    await pane.getByText("规划执行").waitFor();
     assert.match(await versionText(page), /1 \/ 1/);
   } finally {
     await context.close();
@@ -642,12 +1204,19 @@ test("element selection targets only the chosen card", async () => {
       <article id="beta"><h2>Beta</h2><p>Change beta.</p></article>
     </main></body></html>`);
     await preview(page).locator("#beta").evaluate((element) => element.click());
-    await page.locator(".selection-chip").waitFor();
-    assert.match(await page.locator(".selection-chip").innerText(), /Beta/);
+    await coworkPane(page).locator(".selection-chip").waitFor();
+    assert.match(
+      await coworkPane(page).locator(".selection-chip").innerText(),
+      /Beta/,
+    );
     await submit(page, "E2E TARGET");
     assert.equal(await preview(page).locator("#alpha h2").innerText(), "Alpha");
     assert.equal(await preview(page).locator("#beta h2").innerText(), "Targeted Beta");
-    const request = gatewayRequests.find((item) => /E2E TARGET/.test(item.instruction));
+    const request = gatewayRequests.find(
+      (item) =>
+        isExecutionGatewayRequest(item) &&
+        /E2E TARGET/.test(item.instruction),
+    );
     assert.match(request?.user || "", /data-canvasly-edit-target/);
   } finally {
     await context.close();
@@ -674,12 +1243,16 @@ test("region selection creates content through the exact insertion slot", async 
     await page.mouse.down();
     await page.mouse.move(layerBox.x + Math.min(layerBox.width - 80, 700), top + 18, { steps: 4 });
     await page.mouse.up();
-    await page.locator(".selection-chip").waitFor();
+    await coworkPane(page).locator(".selection-chip").waitFor();
     await submit(page, "E2E REGION INSERT：在圈选位置添加一个 Region card 组件");
     assert.equal(await preview(page).locator("#e2e-region-card").count(), 1);
     const order = await preview(page).locator("main").evaluate((main) => Array.from(main.children).map((item) => item.id));
     assert.deepEqual(order, ["before", "e2e-region-card", "after"]);
-    const request = gatewayRequests.find((item) => /E2E REGION INSERT/.test(item.instruction));
+    const request = gatewayRequests.find(
+      (item) =>
+        isExecutionGatewayRequest(item) &&
+        /E2E REGION INSERT/.test(item.instruction),
+    );
     assert.match(request?.html || "", /data-canvasly-insertion-slot/);
   } finally {
     await context.close();
@@ -741,7 +1314,7 @@ test("prompt history restores commands and the unsent draft", async () => {
   try {
     await submit(page, "让主标题更醒目");
     await submit(page, "让右侧卡片变成深色");
-    const composer = page.getByRole("textbox", { name: "描述你想要的页面修改…" });
+    const composer = coworkPane(page).locator(".composer textarea");
     await composer.fill("未发送草稿");
     await composer.press("ArrowUp");
     assert.equal(await composer.inputValue(), "让右侧卡片变成深色");
@@ -761,7 +1334,7 @@ test("IME composition Enter confirms text without sending", async () => {
   const { context, page } = await newPage();
   try {
     await configureMock(page);
-    const composer = page.locator(".composer textarea");
+    const composer = coworkPane(page).locator(".composer textarea");
     await composer.fill("english from Chinese IME");
     await composer.dispatchEvent("compositionstart", { data: "english" });
     await composer.dispatchEvent("keydown", {
@@ -813,7 +1386,14 @@ test("IME composition Enter confirms text without sending", async () => {
     await composer.press("Enter");
     await page.locator(".message.working").waitFor({ state: "visible" });
     await page.locator(".message.working").waitFor({ state: "hidden" });
-    assert.equal(gatewayRequests.filter((item) => item.instruction === "english from Chinese IME").length, 1);
+    assert.equal(
+      gatewayRequests.filter(
+        (item) =>
+          isExecutionGatewayRequest(item) &&
+          item.instruction === "english from Chinese IME",
+      ).length,
+      1,
+    );
   } finally {
     await context.close();
   }

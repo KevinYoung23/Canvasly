@@ -39,6 +39,41 @@ function hasDangerousBehavior(html) {
   return /<script\b|\son[a-z]+\s*=|(?:href|src)\s*=\s*["']?\s*javascript:/i.test(html);
 }
 
+function assertMobileSingleColumnRule(html, selector) {
+  const media = html.match(
+    /@media\s*\([^)]*max-width\s*:\s*(?:639(?:\.\d+)?|640)px[^)]*\)/i,
+  );
+  assert.ok(media?.index !== undefined, "Expected a mobile max-width media query");
+  const openBrace = html.indexOf("{", media.index + media[0].length);
+  assert.ok(openBrace >= 0, "Expected a mobile media-query body");
+  let depth = 0;
+  let closeBrace = -1;
+  for (let index = openBrace; index < html.length; index += 1) {
+    if (html[index] === "{") depth += 1;
+    if (html[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        closeBrace = index;
+        break;
+      }
+    }
+  }
+  assert.ok(closeBrace > openBrace, "Expected a complete mobile media query");
+  const blocks = html
+    .slice(openBrace + 1, closeBrace)
+    .matchAll(/([^{}]+)\{([^{}]*)\}/g);
+  assert.ok(
+    Array.from(blocks).some(([, selectors, declarations]) =>
+      selectors
+        .split(",")
+        .map((item) => item.trim())
+        .includes(selector) &&
+      /grid-template-columns\s*:\s*1fr/i.test(declarations),
+    ),
+    `Expected ${selector} to use a one-column grid in the mobile media query`,
+  );
+}
+
 function assertReport(payload, allowedStatuses = ["completed", "partial"]) {
   assert.ok(allowedStatuses.includes(payload.status), `Unexpected status: ${payload.status}`);
   assert.equal(typeof payload.summary, "string");
@@ -281,9 +316,12 @@ test("local gpt-5.5 Canvasly matrix", { timeout: 3_600_000 }, async (suite) => {
       html,
       instruction: "Make the dashboard usable below 640px by stacking the dashboard and metric cards into one column. Preserve the existing desktop grid above that breakpoint.",
     });
-    assert.match(payload.html, /@media\s*\([^)]*max-width\s*:\s*(?:639|640)px[^)]*\)/i);
-    assert.match(payload.html, /\.dashboard\s*\{[^}]*grid-template-columns\s*:\s*1fr/is);
-    assert.match(payload.html, /\.metrics\s*\{[^}]*grid-template-columns\s*:\s*1fr/is);
+    assert.match(
+      payload.html,
+      /@media\s*\([^)]*max-width\s*:\s*(?:639(?:\.\d+)?|640)px[^)]*\)/i,
+    );
+    assertMobileSingleColumnRule(payload.html, ".dashboard");
+    assertMobileSingleColumnRule(payload.html, ".metrics");
   });
 
   await suite.test("uses supplied document context in the requested location", async () => {
@@ -413,15 +451,22 @@ test("local gpt-5.5 Canvasly matrix", { timeout: 3_600_000 }, async (suite) => {
       await page.getByRole("button", { name: /real-navigation/i }).waitFor();
       const frame = page.frameLocator('iframe[title="HTML 页面预览"]');
       await frame.locator("#details-control").evaluate((element) => element.click());
-      await page.locator(".selection-chip").waitFor();
+      const cowork = page.locator(".cowork-pane");
+      await cowork.locator(".selection-chip").waitFor();
+      await cowork
+        .getByRole("group", { name: "协作模式" })
+        .getByRole("button", { name: "Agent" })
+        .evaluate((button) => button.click());
 
-      const composer = page.locator(".composer textarea");
+      const composer = cowork.locator(".composer textarea");
       await composer.fill("把选中的 View details 按钮改成语义化页内链接 href=\"#details\"，并给 .details 区块添加 id=\"details\"。保持 hero 文案完全不变，不使用脚本。");
-      await page.getByRole("button", { name: "发送", exact: true }).evaluate((button) => button.click());
-      await page.locator(".message.working").waitFor({ state: "visible", timeout: 30_000 });
-      await page.locator(".message.working").waitFor({ state: "hidden", timeout: 260_000 });
+      await cowork.getByRole("button", { name: "发送" }).evaluate((button) => button.click());
+      await cowork.locator(".message.working").waitFor({ state: "visible", timeout: 30_000 });
+      await cowork.locator(".message.working").waitFor({ state: "hidden", timeout: 260_000 });
 
-      await page.getByText("更新已完成", { exact: true }).waitFor();
+      await page
+        .getByText("页面更新已完成", { exact: true })
+        .waitFor();
       assert.ok(await page.locator(".cowork-report.completed li").count() > 0);
       assert.equal(await frame.locator('a[href="#details"]').innerText(), "View details");
       assert.equal(await frame.locator("#details").count(), 1);

@@ -30,9 +30,10 @@
 
 多数 AI 网页工具把人挡在工作之外：描述需求、等待、检查结果，然后重复。Canvasly 把人、模型与真实页面放在同一张画布上。
 
-- **先聊清楚，再决定是否修改。** Chat 模式可以讨论方向、层级、内容与取舍，但不会触碰画布。
+- **一条对话，边聊边工作。** 像 Codex / Claude Code 一样，在同一个侧栏中讨论、搜索、规划并执行真实 HTML 修改。
 - **在真实 HTML 上协作。** Cowork 模式支持元素选择、圈选、手绘、附件和源码编辑，并应用经过校验的完整文档修改。
-- **任务运行中继续跟进。** 输入框不会锁定；使用 **Steer** 把下一条指令提升为最高优先级，或用 **Queue** 按顺序排队。
+- **模型自动判断深度。** Auto 决定只回答、先规划或直接执行；Plan 保证不改画布；Agent 专注执行。
+- **任务运行中继续跟进。** 使用 **Steer** 或 **Queue** 安排 Cowork 后续任务，同时仍可在 Chat 中继续交流。
 - **直接操作页面。** 点击按钮、编辑输入框、选择 DOM 元素，并像 PPT 一样自由移动多个组件。
 - **始终保留控制权。** 实时预览移动、撤销暂存步骤、放弃整批调整，或撤销最终渲染版本。
 
@@ -42,19 +43,21 @@
 
 <img src="./docs/assets/canvasly-overview.png" alt="Canvasly Cowork 工作台" width="100%" />
 
-### 两种模式，两种明确承诺
+### Auto / Plan / Agent，一个连续上下文
 
-| Cowork | Chat |
+| 模式 | 承诺 |
 | --- | --- |
-| 生成并应用经过检查的 HTML 修改。 | 只讨论页面，不修改画布。 |
-| 支持选择、圈选、手绘、附件和源码。 | 适合产品思考、视觉评审与信息架构讨论。 |
-| 创建可撤销、可重做的版本历史。 | 拥有独立的对话历史。 |
+| Auto | 模型结合上下文自动判断回答、规划或执行。 |
+| Plan | 流式讨论、原生搜索、引用和结构化计划，绝不修改画布。 |
+| Agent | 执行局部或高层目标；必要时先规划，最终原子应用经过检查的 HTML。 |
 
 <img src="./docs/assets/canvasly-chat.png" alt="Canvasly Chat 模式" width="100%" />
 
+侧栏可拖动调宽和折叠。运行中仍可发送 **Steer** 或 **Queue**；停止回答会保留已经收到的文本，停止执行会放弃未提交 draft、保留任务前 checkpoint 并暂停队列。
+
 ### Agent 式消息跟进
 
-任务运行时仍可继续输入。**Steer** 会让某条指令在当前任务结束后优先执行；**Queue** 保持 FIFO 顺序。每个 Cowork 任务都从最新 HTML 开始，因此修改会持续累积，而不是互相覆盖。
+任务运行时仍可继续输入。**Steer** 会让某条指令在当前任务结束后优先执行；**Queue** 保持 FIFO 顺序。停止 Cowork 会取消当前任务、保留任务前 checkpoint，并暂停尚未执行的队列。每个 Cowork 任务都从最新 HTML 开始，因此修改会持续累积，而不是互相覆盖。
 
 <img src="./docs/assets/canvasly-agent-queue.png" alt="Canvasly Steer 与 Queue 工作流" width="100%" />
 
@@ -76,16 +79,18 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 协作 | Cowork / Chat、独立消息历史、Agent 状态 |
+| 协作 | 单一 Auto / Plan / Agent 会话、多轮上下文、模型自动路由 |
+| 流式反馈 | Chat token、引用、Cowork 阶段状态、两侧独立停止 |
+| 搜索 | 模型原生 Web Search、能力检测、安全可点击引用 |
 | 执行报告 | 已应用更新、部分完成或阻塞原因、可选择的解决方案 |
-| 跟进 | 运行中可输入、Steer、Queue、可移除任务 |
+| 跟进 | Steer、Queue、暂停/继续/清空队列、停止回滚 |
 | 指令流 | 各模式独立的 `↑` / `↓` 历史、未发送草稿恢复 |
 | 视觉定位 | DOM 选择、区域圈选、手绘标注 |
 | 直接操作 | 页面原生交互、多组件自由移动、整批确认 |
 | 安全导航 | 可用的页内锚点与外部链接、无效控件诊断 |
 | 画布 | 自动适配、光标中心局部缩放、桌面/平板/手机尺寸 |
 | 输入 | 图片、HTML、CSS、Markdown、JSON、源码和文本参考 |
-| 恢复 | 最多 30 个会话版本、撤销、重做、重置、批量回滚 |
+| 恢复 | 最多 30 个版本、统一会话、计划、引用与暂停队列桌面恢复 |
 | 交付 | 完整 HTML 源码编辑、复制、独立 `.html` 导出 |
 
 ## 快速开始
@@ -97,7 +102,7 @@
 - **macOS：** 下载 `.dmg`，打开后把 Canvasly 拖入“应用程序”。同时支持 Apple 芯片和 Intel 芯片。
 - **Windows 10 / 11：** 下载名称以 `Canvasly-Setup-` 开头的 `.exe` 并双击安装。
 
-桌面版已经内置本地服务，**不需要安装 Docker、Node.js 或 Git**。项目、最多 30 个版本，以及上次使用的服务商、协议、节点地址和模型名会自动保存在这台电脑中；API 密钥仍只保留在当前应用会话。若异常结果让画布变空，重启时会自动恢复最近的可见版本，同时保留独立的源码草稿；也可从项目菜单选择“恢复示例页面”。
+桌面版已经内置本地服务，**不需要安装 Docker、Node.js 或 Git**。项目、最多 30 个版本、统一协作历史、暂停队列、计划、引用、附件、侧栏宽度和模型配置会自动保存在这台电脑中；API key 通过 macOS Keychain / Windows DPAPI 加密保存。浏览器/Docker 仍只在当前会话保留密钥。若异常结果让画布变空，重启时会自动恢复最近的可见版本，同时保留独立的源码草稿；也可从项目菜单选择“恢复示例页面”。
 
 #### 应用内更新
 
@@ -251,7 +256,7 @@ npm run desktop:dist   # 生成当前系统的安装包
 
 ## 连接模型
 
-在编辑器中打开模型设置。桌面版会记住服务商、协议、节点地址和模型名；密钥只存在于当前应用会话中，并仅发送给处理本次请求的 Canvasly 服务。
+在编辑器中打开模型设置。桌面版会记住服务商、协议、节点地址和模型名，并通过系统凭据加密保存 API key；浏览器/Docker 的 key 只存在于当前会话。密钥仅发送给处理本次请求的 Canvasly 服务。
 
 | 服务 | 协议 | 默认节点 |
 | --- | --- | --- |
@@ -333,7 +338,7 @@ flowchart LR
 
 ## 安全边界
 
-- API 密钥不会写入 localStorage、日志或项目文件。
+- 桌面 API 密钥只以 Keychain / DPAPI 加密密文保存，不写入协作状态、日志或项目文件；浏览器/Docker 不持久化密钥。
 - 桌面版只在随机 `127.0.0.1` 端口启动内置服务，项目状态写入系统应用数据目录。
 - 桌面更新只接受 GitHub Release 生成的校验元数据；正式发布应同时依赖 macOS / Windows 代码签名。
 - 远程模型节点必须使用 HTTPS。
@@ -349,13 +354,19 @@ flowchart LR
 ```text
 app/
   api/transform/route.ts   模型适配、结果校验、节点安全
-  desktop-api.ts           Electron 安全桥类型与更新状态
+  api/stream/route.ts      Auto/Plan/Agent 标准 SSE 流
+  api/_lib/                provider 流转换、引用和重试
+  desktop-api.ts           Electron 安全桥与持久化类型
   editor-data.ts           模型预设、示例 HTML、提示建议
-  page.tsx                 画布、协作模式、Agent 队列、版本历史
+  stream-client.ts         前端 SSE 解析与标准事件
+  page.tsx                 画布、统一 Agent、计划、队列与历史
   globals.css              响应式工作台与交互样式
 desktop/
   main.mjs                 桌面窗口、本地服务、持久化与更新
   preload.cjs              最小权限 IPC 安全桥
+  credential-vault.mjs     Keychain / DPAPI 加密凭据槽
+  collaboration-state.mjs  统一历史、计划、队列与侧栏状态
+  attachment-store.mjs     安全附件 payload 存储
   build.mjs                跨平台 standalone 构建
   bundle.mjs               精简 Electron 主进程打包
 tools/
@@ -376,7 +387,9 @@ compose.yaml               自托管服务
 ```bash
 npm run lint
 npm test
+npm run test:stream
 npm run test:desktop
+npm run test:desktop-app
 node --check tools/copilot-bridge.mjs
 ```
 
@@ -387,12 +400,12 @@ node --check tools/copilot-bridge.mjs
 ```bash
 ./install.sh
 npm run test:api       # 16 个确定性 API 契约 case
-npm run test:browser   # 15 个确定性 UI 与工作流 case
-npm run test:model     # 19 个真实本地 gpt-5.5 场景，共 25 次请求
+npm run test:browser   # 23 个确定性 UI 与工作流 case
+npm run test:model     # 25 个真实本地 gpt-5.5 场景
 npm run test:e2e       # 依次运行以上三套测试
 ```
 
-`test:model` 默认在 Docker 中连接 `http://host.docker.internal:4141/v1` 的 Responses-compatible 服务并使用 `gpt-5.5`；直接运行 standalone 时使用 `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`。测试覆盖页面创建、组件编辑、定点插入、手绘上下文、长页面、连续修改、并发、导航、安全和真实浏览器链路，报告写入 `.sites-runtime/test-reports/local-model.json`。
+`test:model` 默认在 Docker 中连接 `http://host.docker.internal:4141/v1` 的 Responses-compatible 服务并使用 `gpt-5.5`；直接运行 standalone 时使用 `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`。测试覆盖页面创建、组件编辑、定点插入、手绘上下文、长页面、连续修改、Auto 路由、Plan、Agent 高层规划、停止、导航、安全和真实浏览器链路，报告写入 `.sites-runtime/test-reports/local-model.json`。
 
 macOS 上 `npm test` 需要 GNU `timeout`；等价的底层验证命令为：
 
@@ -404,7 +417,7 @@ node --test tests/rendered-html.test.mjs
 
 ## 当前范围
 
-桌面版会在本机自动保存项目与版本历史，Docker / 浏览器版本仍只保存在当前标签页中。云端项目同步、多人实时协作、可复用组件库和可视化属性面板属于后续方向。
+桌面版会在本机自动保存项目、版本历史、统一协作对话、计划、引用、暂停队列、附件和侧栏状态。Docker / 浏览器版本的这些状态仍只保存在当前标签页中。云端项目同步、多人实时协作、可复用组件库和可视化属性面板属于后续方向。
 
 ---
 

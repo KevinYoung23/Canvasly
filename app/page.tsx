@@ -2,6 +2,8 @@
 
 import {
   ArrowRight,
+  ArrowUpRight,
+  BookOpen,
   BoxSelect,
   Check,
   ChevronDown,
@@ -17,7 +19,6 @@ import {
   ImagePlus,
   Loader2,
   Maximize2,
-  MessageSquare,
   Minus,
   Monitor,
   MousePointer2,
@@ -25,12 +26,15 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
+  Pause,
   Pencil,
+  Play,
   Plus,
   Redo2,
   RotateCcw,
   Send,
   Settings2,
+  Square,
   Smartphone,
   Sparkles,
   Tablet,
@@ -50,6 +54,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -66,6 +71,10 @@ import {
   desktopErrorMessage,
   formatDesktopBytes,
   type DesktopInfo,
+  type DesktopCollaborationAttachment,
+  type DesktopCollaborationAttachmentReference,
+  type DesktopCollaborationState,
+  type DesktopCoworkTask,
   type DesktopPreferences,
   type DesktopProjectSnapshot,
   type DesktopUpdateState,
@@ -76,11 +85,20 @@ import {
   instructionAllowsBlankPage,
   wouldReplacePageWithBlank,
 } from "./html-safety";
+import { fallbackUnifiedAction } from "./intent-routing";
+import {
+  postCanvaslyStream,
+  type CoworkPlan,
+  type HandoffCard,
+  type StreamCitation,
+  type StreamPhase,
+} from "./stream-client";
 
 type ToolMode = "interact" | "select" | "move" | "region" | "draw";
 type DeviceMode = "desktop" | "tablet" | "mobile";
 type PanelTab = "chat" | "code";
 type CollaborationMode = "cowork" | "chat";
+type UnifiedMode = "auto" | "plan" | "agent";
 
 type Rect = {
   x: number;
@@ -162,7 +180,19 @@ type Attachment = {
   data?: string;
   text?: string;
   sizeLabel: string;
+  sizeBytes?: number;
+  desktopReference?: DesktopCollaborationAttachmentReference;
 };
+
+function unavailableAttachmentNames(attachments: Attachment[]) {
+  return attachments
+    .filter((attachment) =>
+      attachment.kind === "image"
+        ? !attachment.data
+        : attachment.text === undefined,
+    )
+    .map((attachment) => attachment.name);
+}
 
 type CoworkStatus = "completed" | "partial" | "blocked";
 
@@ -192,8 +222,13 @@ type ChatMessage = {
   detail?: string;
   error?: boolean;
   jobId?: string;
-  queueState?: "steer" | "queued" | "running";
+  queueState?: "steer" | "queued" | "running" | "interrupted";
   report?: CoworkReport;
+  plan?: CoworkPlan;
+  citations?: StreamCitation[];
+  streamState?: "streaming" | "completed" | "stopped";
+  phase?: StreamPhase;
+  handoffCardId?: string;
 };
 
 type AgentJobPriority = "normal" | "steer" | "queued";
@@ -207,6 +242,9 @@ type AgentJob = {
   selection: SelectionContext | null;
   priority: AgentJobPriority;
   config: ModelConfig;
+  handoffCardId?: string;
+  restoreState?: "paused" | "interrupted";
+  interactionMode?: UnifiedMode;
 };
 
 type ModelConfig = {
@@ -233,6 +271,8 @@ const DEVICE_SIZES: Record<DeviceMode, { width: number; height: number }> = {
 const MIN_CANVAS_SCALE = 0.15;
 const MAX_CANVAS_SCALE = 2.5;
 const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const MAX_COLLABORATION_MESSAGES = 200;
+const MAX_PERSISTED_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 
 function clampCanvasScale(scale: number) {
   return Math.min(MAX_CANVAS_SCALE, Math.max(MIN_CANVAS_SCALE, scale));
@@ -242,8 +282,8 @@ const INITIAL_COWORK_MESSAGES: ChatMessage[] = [
   {
     id: "cowork-welcome",
     role: "assistant",
-    text: "画布已经就绪。下一步想让它变成什么样？",
-    detail: "当前模型 · Canvasly Demo",
+    text: "画布和协作上下文已经就绪。可以直接聊天、让我先规划，或交给 Agent 执行。",
+    detail: "Auto 会自动判断回答、规划或执行",
   },
 ];
 
@@ -306,6 +346,29 @@ function prettyBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const run = async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(limit, items.length) },
+      () => run(),
+    ),
+  );
+  return results;
 }
 
 function projectNameFromFile(fileName: string) {
@@ -1340,9 +1403,12 @@ export default function Home() {
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [device, setDevice] = useState<DeviceMode>("desktop");
   const [panelTab, setPanelTab] = useState<PanelTab>("chat");
-  const [collaborationMode, setCollaborationMode] =
-    useState<CollaborationMode>("cowork");
   const [panelOpen, setPanelOpen] = useState(true);
+  const [unifiedMode, setUnifiedMode] =
+    useState<UnifiedMode>("auto");
+  const [coworkPaneOpen, setCoworkPaneOpen] = useState(true);
+  const [coworkPaneWidth, setCoworkPaneWidth] = useState(390);
+  const [chatPaneWidth, setChatPaneWidth] = useState(360);
   const [canvasFitScale, setCanvasFitScale] = useState(1);
   const [canvasZoom, setCanvasZoom] = useState(1);
   const [history, setHistory] = useState<string[]>([STARTER_HTML]);
@@ -1373,9 +1439,25 @@ export default function Home() {
   const [isWorking, setIsWorking] = useState(false);
   const [activeAgentJob, setActiveAgentJob] = useState<AgentJob | null>(null);
   const [agentQueue, setAgentQueue] = useState<AgentJob[]>([]);
+  const [coworkQueuePaused, setCoworkQueuePaused] = useState(false);
+  const [coworkPhase, setCoworkPhase] = useState<StreamPhase | null>(null);
+  const [chatPrompt, setChatPrompt] = useState("");
+  const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
+  const [chatIsWorking, setChatIsWorking] = useState(false);
+  const [chatPhase, setChatPhase] = useState<StreamPhase | null>(null);
+  const [handoffDraft, setHandoffDraft] = useState<HandoffCard | null>(null);
+  const [handoffCards, setHandoffCards] = useState<HandoffCard[]>([]);
+  const [handoffIsWorking, setHandoffIsWorking] = useState(false);
+  const [collaborationPersistenceReady, setCollaborationPersistenceReady] =
+    useState(false);
+  const [collaborationPersistenceError, setCollaborationPersistenceError] =
+    useState<string | null>(null);
+  const [credentialError, setCredentialError] = useState<string | null>(null);
+  const [sharedCredentialSaved, setSharedCredentialSaved] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [desktopInfo, setDesktopInfo] = useState<DesktopInfo | null>(null);
+  const [desktopHydrating, setDesktopHydrating] = useState(true);
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopUpdateState | null>(null);
   const [desktopPersistenceReady, setDesktopPersistenceReady] = useState(false);
@@ -1394,6 +1476,9 @@ export default function Home() {
     apiKey: "",
   });
   const [draftConfig, setDraftConfig] = useState<ModelConfig>(modelConfig);
+  const [chatOverrideEnabled, setChatOverrideEnabled] = useState(false);
+  const [chatModelConfig, setChatModelConfig] =
+    useState<ModelConfig>(modelConfig);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeCleanupRef = useRef<() => void>(() => undefined);
@@ -1406,12 +1491,15 @@ export default function Home() {
     targetScale: number;
   } | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const chatPromptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const attachmentTargetRef = useRef<CollaborationMode>("cowork");
   const openHtmlInputRef = useRef<HTMLInputElement>(null);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const projectTriggerRef = useRef<HTMLButtonElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const coworkEndRef = useRef<HTMLDivElement>(null);
   const pointerOriginRef = useRef<Point | null>(null);
   const pointerActiveRef = useRef(false);
   const selectionRef = useRef<SelectionContext | null>(null);
@@ -1423,18 +1511,46 @@ export default function Home() {
     cowork: [],
     chat: [],
   });
-  const promptHistoryIndexRef = useRef<number | null>(null);
-  const promptHistoryDraftRef = useRef("");
-  const promptComposingRef = useRef(false);
+  const promptHistoryIndexRef = useRef<Record<CollaborationMode, number | null>>({
+    cowork: null,
+    chat: null,
+  });
+  const promptHistoryDraftRef = useRef<Record<CollaborationMode, string>>({
+    cowork: "",
+    chat: "",
+  });
+  const promptComposingRef = useRef<Record<CollaborationMode, boolean>>({
+    cowork: false,
+    chat: false,
+  });
+  const coworkAbortRef = useRef<AbortController | null>(null);
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const handoffAbortRef = useRef<AbortController | null>(null);
+  const modelSettingsTouchedRef = useRef(false);
+  const pendingModelConfigRef = useRef<ModelConfig | null>(null);
+  const paneResizeRef = useRef<{
+    startX: number;
+    mode: CollaborationMode;
+    startWidth: number;
+  } | null>(null);
   const navigationIssueRef = useRef({ key: "", timestamp: 0 });
   const desktopSnapshotRef = useRef<DesktopProjectSnapshot | null>(null);
   const desktopPreferencesRef = useRef<DesktopPreferences | null>(null);
+  const collaborationSnapshotRef =
+    useRef<DesktopCollaborationState | null>(null);
   const desktopSaveErrorRef = useRef("");
 
   const currentHtml = history[historyIndex];
   const previewHtml = useMemo(() => safePreviewHtml(currentHtml), [currentHtml]);
   const provider =
     PROVIDERS.find((item) => item.id === modelConfig.providerId) ?? PROVIDERS[0];
+  const effectiveChatConfig = chatOverrideEnabled
+    ? chatModelConfig
+    : modelConfig;
+  const chatProvider =
+    PROVIDERS.find(
+      (item) => item.id === effectiveChatConfig.providerId,
+    ) ?? PROVIDERS[0];
   const deviceSize = DEVICE_SIZES[device];
   const canvasScale = clampCanvasScale(canvasFitScale * canvasZoom);
   const canvasScalePercent = Math.round(canvasScale * 100);
@@ -1445,8 +1561,9 @@ export default function Home() {
   const hasStagedMoves = stagedMoves.length > 0;
   const hasAgentWork =
     isWorking || activeAgentJob !== null || agentQueue.length > 0;
-  const messages =
-    collaborationMode === "cowork" ? coworkMessages : chatMessages;
+  const collaborationDockOpen =
+    panelOpen && coworkPaneOpen;
+  const collaborationDockWidth = coworkPaneWidth;
   const desktopSnapshot = useMemo<DesktopProjectSnapshot>(
     () => ({
       schemaVersion: 1,
@@ -1487,11 +1604,138 @@ export default function Home() {
       modelConfig.providerId,
     ],
   );
+  const collaborationSnapshot = useMemo<DesktopCollaborationState>(() => {
+    const persistAttachment = (
+      attachment: Attachment,
+    ): DesktopCollaborationAttachment | null =>
+      attachment.desktopReference
+        ? {
+            id: attachment.id,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            kind: attachment.kind,
+            sizeBytes: attachment.sizeBytes ?? 0,
+            sizeLabel: attachment.sizeLabel,
+            reference: attachment.desktopReference,
+          }
+        : null;
+    const persistMessage = (message: ChatMessage) => ({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      ...(message.detail ? { detail: message.detail } : {}),
+      ...(message.error !== undefined ? { error: message.error } : {}),
+      ...(message.jobId ? { jobId: message.jobId } : {}),
+      ...(message.queueState
+        ? {
+            queueState:
+              message.queueState === "running"
+                ? ("interrupted" as const)
+                : message.queueState,
+          }
+        : {}),
+      ...(message.report ? { report: message.report } : {}),
+      ...(message.plan ? { plan: message.plan } : {}),
+      ...(message.citations ? { citations: message.citations } : {}),
+      ...(message.streamState
+        ? {
+            streamState:
+              message.streamState === "streaming"
+                ? ("stopped" as const)
+                : message.streamState,
+          }
+        : {}),
+      ...(message.phase ? { phase: message.phase } : {}),
+      ...(message.handoffCardId
+        ? { handoffCardId: message.handoffCardId }
+        : {}),
+    });
+    const persistTask = (task: AgentJob): DesktopCoworkTask => ({
+      id: task.id,
+      messageId: task.messageId,
+      mode: "cowork",
+      instruction: task.instruction,
+      attachments: task.attachments.flatMap((attachment) => {
+        const persisted = persistAttachment(attachment);
+        return persisted ? [persisted] : [];
+      }),
+      selection: task.selection,
+      priority: task.priority,
+      modelConfig: {
+        providerId: task.config.providerId,
+        protocol: task.config.protocol,
+        baseUrl: task.config.baseUrl,
+        model: task.config.model,
+      },
+      ...(task.handoffCardId
+        ? { handoffCardId: task.handoffCardId }
+        : {}),
+      ...(task.restoreState
+        ? { restoreState: task.restoreState }
+        : {}),
+      interactionMode: task.interactionMode ?? "auto",
+    });
+    return {
+      schemaVersion: 1,
+      unifiedMessages: coworkMessages
+        .slice(-MAX_COLLABORATION_MESSAGES)
+        .map(persistMessage),
+      activeMode: unifiedMode,
+      pane: {
+        open: collaborationDockOpen,
+        width: coworkPaneWidth,
+      },
+      pendingAttachments: attachments.flatMap((attachment) => {
+        const persisted = persistAttachment(attachment);
+        return persisted ? [persisted] : [];
+      }),
+      coworkMessages: coworkMessages
+        .slice(-MAX_COLLABORATION_MESSAGES)
+        .map(persistMessage),
+      chatMessages: [],
+      handoffCards: [],
+      coworkQueue: agentQueue.map(persistTask),
+      coworkQueuePaused,
+      coworkStrategy: "auto",
+      activeCoworkTask: activeAgentJob
+        ? persistTask(activeAgentJob)
+        : null,
+      panes: {
+        layout: "switch",
+        cowork: { open: coworkPaneOpen, width: coworkPaneWidth },
+        chat: { open: false, width: 360 },
+        activeMobilePane: collaborationDockOpen
+          ? "cowork"
+          : "canvas",
+      },
+      chatModelOverride: null,
+      attachments: {
+        cowork: attachments.flatMap((attachment) => {
+          const persisted = persistAttachment(attachment);
+          return persisted ? [persisted] : [];
+        }),
+        chat: [],
+      },
+      savedAt: new Date().toISOString(),
+    };
+  }, [
+    activeAgentJob,
+    agentQueue,
+    attachments,
+    collaborationDockOpen,
+    coworkMessages,
+    coworkPaneOpen,
+    coworkPaneWidth,
+    coworkQueuePaused,
+    unifiedMode,
+  ]);
 
   const appendModeMessage = useCallback(
     (mode: CollaborationMode, message: ChatMessage) => {
       const setter = mode === "cowork" ? setCoworkMessages : setChatMessages;
-      setter((items) => [...items, message]);
+      setter((items) =>
+        [...items, message].slice(-MAX_COLLABORATION_MESSAGES),
+      );
     },
     [],
   );
@@ -1521,7 +1765,10 @@ export default function Home() {
 
   useEffect(() => {
     const desktop = window.canvaslyDesktop;
-    if (!desktop) return;
+    if (!desktop) {
+      queueMicrotask(() => setDesktopHydrating(false));
+      return;
+    }
 
     let disposed = false;
     const unsubscribe = desktop.onUpdateState((state) => {
@@ -1537,12 +1784,46 @@ export default function Home() {
         setDesktopInfo(info);
         setDesktopUpdate(update);
 
-        const [projectResult, preferencesResult] =
+        const [
+          projectResult,
+          preferencesResult,
+          collaborationResult,
+          sharedCredentialResult,
+          chatCredentialResult,
+        ] =
           await Promise.allSettled([
             desktop.loadProject(),
             desktop.loadPreferences(),
+            desktop.loadCollaboration(),
+            desktop.readCredential("shared-model-api-key"),
+            desktop.readCredential("chat-model-api-key"),
           ]);
         if (disposed) return;
+
+        const sharedCredential =
+          sharedCredentialResult.status === "fulfilled" &&
+          sharedCredentialResult.value.ok
+            ? sharedCredentialResult.value.value ?? ""
+            : "";
+        const chatCredential =
+          chatCredentialResult.status === "fulfilled" &&
+          chatCredentialResult.value.ok
+            ? chatCredentialResult.value.value ?? ""
+            : "";
+        setSharedCredentialSaved(Boolean(sharedCredential));
+        const credentialFailure =
+          sharedCredentialResult.status === "fulfilled" &&
+          !sharedCredentialResult.value.ok
+            ? sharedCredentialResult.value.error.message
+            : chatCredentialResult.status === "fulfilled" &&
+                !chatCredentialResult.value.ok
+              ? chatCredentialResult.value.error.message
+              : sharedCredentialResult.status === "rejected"
+                ? desktopErrorMessage(sharedCredentialResult.reason)
+                : chatCredentialResult.status === "rejected"
+                  ? desktopErrorMessage(chatCredentialResult.reason)
+                  : null;
+        setCredentialError(credentialFailure);
 
         if (projectResult.status === "fulfilled") {
           const snapshot = projectResult.value;
@@ -1589,11 +1870,19 @@ export default function Home() {
 
         if (preferencesResult.status === "fulfilled") {
           const preferences = preferencesResult.value;
-          if (preferences) {
+          if (preferences && !modelSettingsTouchedRef.current) {
             setModelConfig({
               ...preferences.modelConfig,
-              apiKey: "",
+              apiKey: sharedCredential,
             });
+          } else if (
+            sharedCredential &&
+            !modelSettingsTouchedRef.current
+          ) {
+            setModelConfig((config) => ({
+              ...config,
+              apiKey: sharedCredential,
+            }));
           }
           setDesktopPreferencesReady(true);
         } else {
@@ -1605,11 +1894,159 @@ export default function Home() {
           setDesktopPreferencesError(message);
           showToast(`模型节点恢复失败：${message}`);
         }
+
+        if (collaborationResult.status === "fulfilled") {
+          const collaboration = collaborationResult.value;
+          if (collaboration) {
+            let attachmentRestoreFailed = false;
+            const restoreAttachment = async (
+              attachment: DesktopCollaborationState["attachments"]["cowork"][number],
+            ): Promise<Attachment> => {
+              const restored =
+                await desktop.readCollaborationAttachment(
+                  attachment.reference,
+                );
+              if (!restored.ok) {
+                attachmentRestoreFailed = true;
+                return {
+                  id: attachment.id,
+                  name: attachment.name,
+                  mimeType: attachment.mimeType,
+                  kind: attachment.kind,
+                  sizeBytes: attachment.sizeBytes,
+                  sizeLabel: attachment.sizeLabel ?? "",
+                  desktopReference: attachment.reference,
+                };
+              }
+              return {
+                id: restored.attachment.id,
+                name: restored.attachment.name,
+                mimeType: restored.attachment.mimeType,
+                kind: restored.attachment.kind,
+                sizeBytes: restored.attachment.sizeBytes,
+                sizeLabel: restored.attachment.sizeLabel ?? "",
+                data:
+                  restored.attachment.kind === "image"
+                    ? restored.attachment.data
+                    : undefined,
+                text:
+                  restored.attachment.kind === "document"
+                    ? restored.attachment.text
+                    : undefined,
+                desktopReference: restored.attachment.reference,
+              };
+            };
+            const restoreTask = async (
+              task: DesktopCoworkTask,
+            ): Promise<AgentJob> => ({
+              id: task.id,
+              messageId: task.messageId,
+              mode: "cowork",
+              instruction: task.instruction,
+              attachments: await mapWithConcurrency(
+                task.attachments,
+                2,
+                restoreAttachment,
+              ),
+              selection: task.selection as SelectionContext | null,
+              priority: task.priority,
+              config: {
+                ...task.modelConfig,
+                apiKey: sharedCredential,
+              },
+              handoffCardId: task.handoffCardId,
+              restoreState: task.restoreState,
+              interactionMode: task.interactionMode ?? "auto",
+            });
+            setCoworkMessages(
+              collaboration.unifiedMessages.length
+                ? (collaboration.unifiedMessages as ChatMessage[])
+                : INITIAL_COWORK_MESSAGES,
+            );
+            setChatMessages(INITIAL_CHAT_MESSAGES);
+            setHandoffCards([]);
+            setUnifiedMode(collaboration.activeMode);
+            const restoredQueue = await mapWithConcurrency(
+              collaboration.coworkQueue,
+              2,
+              restoreTask,
+            );
+            if (disposed) return;
+            setAgentQueue(restoredQueue);
+            setCoworkQueuePaused(
+              collaboration.coworkQueuePaused ||
+                collaboration.coworkQueue.length > 0 ||
+                attachmentRestoreFailed,
+            );
+            setCoworkPaneOpen(collaboration.pane.open);
+            setCoworkPaneWidth(collaboration.pane.width);
+            setPanelOpen(collaboration.pane.open);
+            if (!modelSettingsTouchedRef.current) {
+              setChatOverrideEnabled(false);
+              setChatModelConfig((config) => ({
+                ...config,
+                apiKey: chatCredential,
+              }));
+            }
+            setAttachments(
+              await mapWithConcurrency(
+                collaboration.pendingAttachments,
+                2,
+                restoreAttachment,
+              ),
+            );
+            setChatAttachments([]);
+            if (attachmentRestoreFailed) {
+              setCollaborationPersistenceError(
+                "部分附件缺失或损坏；队列保持暂停，请检查后再继续",
+              );
+              showToast(
+                "部分附件无法恢复，Cowork 队列已保持暂停",
+              );
+            }
+          }
+          setCollaborationPersistenceReady(true);
+        } else {
+          const message = desktopErrorMessage(
+            collaborationResult.reason,
+          );
+          console.error(
+            "[Canvasly] Desktop collaboration restore failed",
+            collaborationResult.reason,
+          );
+          try {
+            const { backupName } =
+              await desktop.quarantineCollaboration();
+            if (disposed) return;
+            setCollaborationPersistenceError(
+              `旧协作历史无法读取，已备份为 ${backupName}`,
+            );
+            setCollaborationPersistenceReady(true);
+            showToast(
+              `协作历史恢复失败，旧文件已备份为 ${backupName}，将使用新的历史`,
+            );
+          } catch (recoveryError) {
+            const recoveryMessage =
+              desktopErrorMessage(recoveryError);
+            console.error(
+              "[Canvasly] Collaboration recovery failed",
+              recoveryError,
+            );
+            setCollaborationPersistenceError(
+              `${message}；备份失败：${recoveryMessage}`,
+            );
+            showToast(
+              `协作历史恢复失败且无法安全备份：${recoveryMessage}`,
+            );
+          }
+        }
       } catch (error) {
         if (disposed) return;
         const message = desktopErrorMessage(error);
         console.error("[Canvasly] Desktop initialization failed", error);
         showToast(`桌面功能初始化失败：${message}`);
+      } finally {
+        if (!disposed) setDesktopHydrating(false);
       }
     })();
     return () => {
@@ -1625,6 +2062,10 @@ export default function Home() {
   useEffect(() => {
     desktopPreferencesRef.current = desktopPreferences;
   }, [desktopPreferences]);
+
+  useEffect(() => {
+    collaborationSnapshotRef.current = collaborationSnapshot;
+  }, [collaborationSnapshot]);
 
   useEffect(() => {
     const desktop = window.canvaslyDesktop;
@@ -1656,7 +2097,49 @@ export default function Home() {
 
   useEffect(() => {
     const desktop = window.canvaslyDesktop;
+    if (
+      !desktop ||
+      !desktopInfo ||
+      !collaborationPersistenceReady
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void desktop
+        .saveCollaboration(collaborationSnapshot)
+        .then(() => setCollaborationPersistenceError(null))
+        .catch((error: unknown) => {
+          const message = desktopErrorMessage(error);
+          console.error(
+            "[Canvasly] Desktop collaboration save failed",
+            error,
+          );
+          setCollaborationPersistenceError(message);
+          showToast(`协作历史保存失败：${message}`);
+        });
+    }, 600);
+    return () => window.clearTimeout(timeout);
+  }, [
+    collaborationPersistenceReady,
+    collaborationSnapshot,
+    desktopInfo,
+    showToast,
+  ]);
+
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
     if (!desktop || !desktopInfo || !desktopPreferencesReady) return;
+    const pending = pendingModelConfigRef.current;
+    if (
+      pending &&
+      (pending.providerId !== modelConfig.providerId ||
+        pending.protocol !== modelConfig.protocol ||
+        pending.baseUrl !== modelConfig.baseUrl ||
+        pending.model !== modelConfig.model)
+    ) {
+      return;
+    }
+    if (pending) pendingModelConfigRef.current = null;
 
     const timeout = window.setTimeout(() => {
       void desktop
@@ -1672,6 +2155,10 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [
     desktopInfo,
+    modelConfig.baseUrl,
+    modelConfig.model,
+    modelConfig.protocol,
+    modelConfig.providerId,
     desktopPreferences,
     desktopPreferencesReady,
     showToast,
@@ -1746,13 +2233,50 @@ export default function Home() {
     desktopPreferencesReady,
   ]);
 
+  useEffect(() => {
+    const desktop = window.canvaslyDesktop;
+    if (
+      !desktop ||
+      !desktopInfo ||
+      !collaborationPersistenceReady ||
+      collaborationPersistenceError
+    ) {
+      return;
+    }
+    const saveBeforeUnload = () => {
+      const snapshot = collaborationSnapshotRef.current;
+      if (!snapshot) return;
+      try {
+        const result =
+          desktop.saveCollaborationBeforeUnload(snapshot);
+        if (!result.ok) {
+          console.error(
+            `[Canvasly] Collaboration unload save failed: ${result.message}`,
+          );
+        }
+      } catch (error) {
+        console.error(
+          "[Canvasly] Collaboration unload save failed",
+          error,
+        );
+      }
+    };
+    window.addEventListener("beforeunload", saveBeforeUnload);
+    return () =>
+      window.removeEventListener("beforeunload", saveBeforeUnload);
+  }, [
+    collaborationPersistenceError,
+    collaborationPersistenceReady,
+    desktopInfo,
+  ]);
+
   const chooseCoworkSuggestion = useCallback((suggestion: CoworkSuggestion) => {
-    setCollaborationMode("cowork");
     setPanelOpen(true);
+    setCoworkPaneOpen(true);
     setPanelTab("chat");
     setPrompt(suggestion.prompt);
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
+    promptHistoryIndexRef.current.cowork = null;
+    promptHistoryDraftRef.current.cowork = "";
     window.setTimeout(() => {
       promptRef.current?.focus();
       promptRef.current?.setSelectionRange(
@@ -1788,8 +2312,8 @@ export default function Home() {
         suggestions,
       },
     });
-    setCollaborationMode("cowork");
     setPanelOpen(true);
+    setCoworkPaneOpen(true);
     setPanelTab("chat");
     showToast(summary);
   }, [appendModeMessage, showToast]);
@@ -1985,6 +2509,7 @@ export default function Home() {
   const activateTool = useCallback((mode: ToolMode) => {
     if (mode === "move" && hasPendingCodeDraft) {
       setPanelOpen(true);
+      setCoworkPaneOpen(true);
       setPanelTab("code");
       showToast("请先应用或放弃 HTML 草稿，再移动组件");
       return;
@@ -2380,6 +2905,7 @@ export default function Home() {
         if (!anchor && !button) return;
 
         const control = anchor ?? button;
+        if (!control) return;
         const controlName =
           control.getAttribute("aria-label") ||
           control.textContent?.replace(/\s+/g, " ").trim().slice(0, 52) ||
@@ -2509,6 +3035,7 @@ export default function Home() {
       setDrawPoints([]);
       setHoverRect(null);
       setPanelOpen(true);
+      setCoworkPaneOpen(true);
       window.setTimeout(() => promptRef.current?.focus(), 80);
     };
 
@@ -2547,8 +3074,18 @@ export default function Home() {
   useEffect(() => () => iframeCleanupRef.current(), []);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [messages, isWorking]);
+    coworkEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [coworkMessages, isWorking]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [chatMessages, chatIsWorking]);
 
   useEffect(() => {
     if (!projectMenuOpen) return;
@@ -2608,6 +3145,7 @@ export default function Home() {
       if (event.key === "/") {
         event.preventDefault();
         setPanelOpen(true);
+        setCoworkPaneOpen(true);
         setPanelTab("chat");
         window.setTimeout(() => promptRef.current?.focus(), 60);
       }
@@ -2715,13 +3253,84 @@ export default function Home() {
       }
     }
     setPanelOpen(true);
+    setCoworkPaneOpen(true);
     setPanelTab("chat");
     window.setTimeout(() => promptRef.current?.focus(), 60);
   };
 
+  const storeDesktopAttachment = useCallback(
+    async (attachment: Attachment) => {
+      const desktop = window.canvaslyDesktop;
+      if (!desktop) return attachment;
+      const result =
+        attachment.kind === "image" && attachment.data
+          ? await desktop.storeCollaborationAttachment({
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              kind: "image",
+              data: attachment.data,
+              sizeBytes: attachment.sizeBytes,
+              sizeLabel: attachment.sizeLabel,
+            })
+          : attachment.kind === "document" &&
+              attachment.text !== undefined
+            ? await desktop.storeCollaborationAttachment({
+                id: attachment.id,
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                kind: "document",
+                text: attachment.text,
+                sizeBytes: attachment.sizeBytes,
+                sizeLabel: attachment.sizeLabel,
+              })
+            : null;
+      if (!result) {
+        showToast(`${attachment.name} 没有可持久化内容`);
+        return null;
+      }
+      if (!result.ok) {
+        showToast(
+          `${attachment.name} 无法安全保存：${result.error.message}`,
+        );
+        return null;
+      }
+      return {
+        ...attachment,
+        sizeBytes: result.attachment.sizeBytes,
+        desktopReference: result.attachment.reference,
+      };
+    },
+    [showToast],
+  );
+
+  const deleteDesktopAttachments = useCallback(
+    async (items: Attachment[]) => {
+      const desktop = window.canvaslyDesktop;
+      if (!desktop) return;
+      for (const attachment of items) {
+        if (!attachment.desktopReference) continue;
+        const result = await desktop.deleteCollaborationAttachment(
+          attachment.desktopReference,
+        );
+        if (!result.ok && result.error.code !== "attachment-not-found") {
+          console.error(
+            `[Canvasly] Failed to delete attachment ${attachment.name}: ${result.error.message}`,
+          );
+        }
+      }
+    },
+    [],
+  );
+
   const addFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const incoming = Array.from(files).slice(0, 4 - attachments.length);
+    async (
+      files: FileList | File[],
+      target: CollaborationMode = attachmentTargetRef.current,
+    ) => {
+      const existing =
+        target === "cowork" ? attachments : chatAttachments;
+      const incoming = Array.from(files).slice(0, 4 - existing.length);
       const next: Attachment[] = [];
       for (const file of incoming) {
         try {
@@ -2737,19 +3346,26 @@ export default function Home() {
               kind: "image",
               data: await readFileAsDataUrl(file),
               sizeLabel: prettyBytes(file.size),
+              sizeBytes: file.size,
             });
           } else {
             if (file.size > 1024 * 1024) {
               showToast(`${file.name} 超过 1 MB，已跳过`);
               continue;
             }
+            const text = (await readFileAsText(file)).slice(
+              0,
+              120_000,
+            );
+            const sizeBytes = new TextEncoder().encode(text).byteLength;
             next.push({
               id: makeId("doc"),
               name: file.name,
               mimeType: file.type || "text/plain",
               kind: "document",
-              text: (await readFileAsText(file)).slice(0, 120_000),
-              sizeLabel: prettyBytes(file.size),
+              text,
+              sizeLabel: prettyBytes(sizeBytes),
+              sizeBytes,
             });
           }
         } catch {
@@ -2757,31 +3373,466 @@ export default function Home() {
         }
       }
       if (next.length) {
-        setAttachments((items) => [...items, ...next].slice(0, 4));
+        const persisted = await Promise.all(
+          next.map(storeDesktopAttachment),
+        );
+        const available = persisted.filter(
+          (attachment): attachment is Attachment =>
+            attachment !== null,
+        );
+        if (!available.length) return;
+        const setter =
+          target === "cowork" ? setAttachments : setChatAttachments;
+        setter((items) => [...items, ...available].slice(0, 4));
         setPanelOpen(true);
-        setPanelTab("chat");
+        if (target === "cowork") {
+          setCoworkPaneOpen(true);
+          setPanelTab("chat");
+        } else {
+        }
       }
     },
-    [attachments.length, showToast],
+    [
+      attachments,
+      chatAttachments,
+      showToast,
+      storeDesktopAttachment,
+    ],
   );
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    void addFiles(event.dataTransfer.files);
+    void addFiles(event.dataTransfer.files, "cowork");
   };
 
-  const removeAttachment = (id: string) => {
-    setAttachments((items) => items.filter((item) => item.id !== id));
+  const removeAttachment = (mode: CollaborationMode, id: string) => {
+    const items =
+      mode === "cowork" ? attachments : chatAttachments;
+    const removed = items.find((item) => item.id === id);
+    const setter = mode === "cowork" ? setAttachments : setChatAttachments;
+    setter((current) => current.filter((item) => item.id !== id));
+    if (removed) void deleteDesktopAttachments([removed]);
   };
 
-  const switchCollaborationMode = (mode: CollaborationMode) => {
-    setCollaborationMode(mode);
-    setPanelTab("chat");
-    setPanelOpen(true);
-    setPrompt("");
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
+  const beginPaneResize = (
+    mode: CollaborationMode,
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    paneResizeRef.current = {
+      startX: event.clientX,
+      mode,
+      startWidth:
+        mode === "cowork" ? coworkPaneWidth : chatPaneWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
+
+  useEffect(() => {
+    const handlePointerMove = (event: globalThis.PointerEvent) => {
+      const resize = paneResizeRef.current;
+      if (!resize) return;
+      const nextWidth = Math.max(
+        280,
+        Math.min(
+          760,
+          resize.startWidth - (event.clientX - resize.startX),
+        ),
+      );
+      if (resize.mode === "cowork") {
+        setCoworkPaneWidth(Math.round(nextWidth));
+      } else {
+        setChatPaneWidth(Math.round(nextWidth));
+      }
+    };
+    const finishResize = () => {
+      paneResizeRef.current = null;
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+    };
+  }, []);
+
+  const executeUnifiedAdaptiveJob = useCallback(
+    async (job: AgentJob) => {
+      const sourceHtml = currentHtml;
+      const requestRevision = documentRevisionRef.current;
+      const prepared = prepareTransformHtml(
+        sourceHtml,
+        job.selection,
+        job.instruction,
+      );
+      const assistantMessageId = makeId("assistant");
+      const controller = new AbortController();
+      coworkAbortRef.current = controller;
+      setActiveAgentJob(job);
+      setIsWorking(true);
+      setCoworkPhase({
+        stage: "preparing",
+        message: "正在准备页面与对话上下文…",
+      });
+      updateModeMessage("cowork", job.messageId, {
+        queueState: "running",
+        detail:
+          job.priority === "steer"
+            ? "Steer · 正在优先跟进"
+            : job.priority === "queued"
+              ? "Queue · 正在执行"
+              : undefined,
+      });
+      appendModeMessage("cowork", {
+        id: assistantMessageId,
+        role: "assistant",
+        text: "",
+        streamState: "streaming",
+        phase: {
+          stage: "preparing",
+          message: "正在准备页面与对话上下文…",
+        },
+      });
+
+      let streamedResult: unknown;
+      try {
+        if (job.config.protocol === "demo") {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, 420),
+          );
+          if (controller.signal.aborted) {
+            throw new DOMException("Unified task stopped", "AbortError");
+          }
+          const demoAction =
+            job.interactionMode === "auto"
+              ? fallbackUnifiedAction(
+                  job.instruction,
+                  Boolean(job.selection),
+                )
+              : job.interactionMode;
+          const advisory = demoAction !== "agent";
+          if (advisory) {
+            const plan =
+              demoAction === "plan"
+                ? {
+                    strategy: "mission" as const,
+                    objective: job.instruction,
+                    summary: "先梳理目标、页面层级和可执行步骤。",
+                    assumptions: [
+                      "保留未明确要求修改的内容和现有品牌方向。",
+                    ],
+                    steps: [
+                      {
+                        id: "step-1",
+                        title: "检查当前页面",
+                        description: "识别信息层级和主要用户目标。",
+                      },
+                      {
+                        id: "step-2",
+                        title: "形成修改方案",
+                        description: "定义内容、视觉和交互调整。",
+                      },
+                    ],
+                    acceptanceCriteria: [
+                      "计划包含明确目标和可验证步骤。",
+                    ],
+                    openQuestions: [],
+                  }
+                : undefined;
+            updateModeMessage("cowork", assistantMessageId, {
+              text: plan
+                ? plan.summary
+                : "可以。我们先从目标用户、信息层级、视觉方向和实现取舍开始讨论；切换到 Agent 后可直接执行。",
+              plan,
+              streamState: "completed",
+              phase: undefined,
+            });
+            return;
+          }
+          const demoResult = applyDemoEdit(
+            sourceHtml,
+            job.instruction,
+            job.selection,
+          );
+          if (documentRevisionRef.current !== requestRevision) {
+            throw new Error(
+              "运行期间画布已发生变化，本次结果未应用。",
+            );
+          }
+          commitHtml(demoResult.html);
+          updateModeMessage("cowork", assistantMessageId, {
+            text: "页面更新已完成",
+            detail: demoResult.summary,
+            streamState: "completed",
+            phase: undefined,
+            report: {
+              status: "completed",
+              updates: [demoResult.summary],
+              issues: [],
+              suggestions: [],
+            },
+          });
+          return;
+        }
+        await postCanvaslyStream(
+          {
+            mode: job.interactionMode ?? "auto",
+            config: job.config,
+            html: prepared.html,
+            instruction: job.instruction,
+            selection: prepared.selection,
+            attachments: job.attachments,
+            history: coworkMessages
+              .filter(
+                (message) =>
+                  !message.id.endsWith("welcome") &&
+                  message.id !== job.messageId &&
+                  message.queueState === undefined &&
+                  message.streamState !== "streaming",
+              )
+              .slice(-30)
+              .map((message) => ({
+                id: message.id,
+                role: message.role,
+                text: message.text,
+                citations: message.citations,
+              })),
+          },
+          {
+            onEvent(event) {
+              if (event.type === "phase") {
+                setCoworkPhase(event.phase);
+                updateModeMessage("cowork", assistantMessageId, {
+                  phase: event.phase,
+                });
+              }
+              if (event.type === "decision") {
+                updateModeMessage("cowork", assistantMessageId, {
+                  detail: `Auto · ${event.decision.summary}`,
+                });
+              }
+              if (event.type === "plan") {
+                updateModeMessage("cowork", assistantMessageId, {
+                  plan: event.plan,
+                });
+              }
+              if (event.type === "delta") {
+                setCoworkMessages((items) =>
+                  items.map((message) =>
+                    message.id === assistantMessageId
+                      ? {
+                          ...message,
+                          text: `${message.text}${event.text}`,
+                        }
+                      : message,
+                  ),
+                );
+              }
+              if (event.type === "citation") {
+                setCoworkMessages((items) =>
+                  items.map((message) => {
+                    if (message.id !== assistantMessageId) return message;
+                    const citations = message.citations ?? [];
+                    return citations.some(
+                      (citation) => citation.id === event.citation.id,
+                    )
+                      ? message
+                      : {
+                          ...message,
+                          citations: [...citations, event.citation],
+                        };
+                  }),
+                );
+              }
+              if (event.type === "result") streamedResult = event.result;
+              if (event.type === "error") throw new Error(event.message);
+            },
+          },
+          controller.signal,
+        );
+        if (controller.signal.aborted) {
+          throw new DOMException("Unified task stopped", "AbortError");
+        }
+        const payload =
+          streamedResult && typeof streamedResult === "object"
+            ? (streamedResult as Record<string, unknown>)
+            : {};
+        const payloadPlan =
+          payload.plan && typeof payload.plan === "object"
+            ? (payload.plan as CoworkPlan)
+            : undefined;
+        if (payload.status === "blocked") {
+          updateModeMessage("cowork", assistantMessageId, {
+            text: "需要你确认下一步",
+            detail:
+              typeof payload.summary === "string"
+                ? payload.summary
+                : "当前任务被阻塞",
+            streamState: "completed",
+            phase: undefined,
+            plan: payloadPlan,
+            report: {
+              status: "blocked",
+              updates: [],
+              issues: Array.isArray(payload.issues)
+                ? (payload.issues as string[])
+                : [],
+              suggestions: Array.isArray(payload.suggestions)
+                ? (payload.suggestions as CoworkSuggestion[])
+                : [],
+            },
+          });
+          return;
+        }
+        if (
+          typeof payload.html === "string" &&
+          (payload.status === "completed" ||
+            payload.status === "partial")
+        ) {
+          const cleaned = cleanTransformHtml(
+            payload.html,
+            prepared.markerToken,
+            prepared.insertionExpected,
+            prepared.selection?.placement,
+          );
+          if (
+            prepared.insertionExpected &&
+            !cleaned.insertionApplied
+          ) {
+            throw new Error(
+              "模型没有把组件放入圈选位置，已停止应用。",
+            );
+          }
+          if (documentRevisionRef.current !== requestRevision) {
+            throw new Error(
+              "运行期间画布已发生变化。已保留最新版本，本次结果未应用。",
+            );
+          }
+          if (
+            wouldReplacePageWithBlank(
+              sourceHtml,
+              cleaned.html,
+              job.instruction,
+            )
+          ) {
+            throw new Error(
+              "模型返回了异常空白页面，已保留当前画布。",
+            );
+          }
+          commitHtml(
+            cleaned.html,
+            !hasRenderableBodyContent(cleaned.html) &&
+              instructionAllowsBlankPage(job.instruction),
+          );
+          updateModeMessage("cowork", assistantMessageId, {
+            text:
+              payload.status === "partial"
+                ? "已完成可执行部分"
+                : "页面更新已完成",
+            detail:
+              typeof payload.summary === "string"
+                ? payload.summary
+                : undefined,
+            streamState: "completed",
+            phase: undefined,
+            plan: payloadPlan,
+            report: {
+              status: payload.status,
+              updates: Array.isArray(payload.updates)
+                ? (payload.updates as string[])
+                : [],
+              issues: Array.isArray(payload.issues)
+                ? (payload.issues as string[])
+                : [],
+              suggestions: Array.isArray(payload.suggestions)
+                ? (payload.suggestions as CoworkSuggestion[])
+                : [],
+            },
+          });
+          return;
+        }
+        const reply =
+          typeof payload.reply === "string" ? payload.reply : "";
+        const plan =
+          payloadPlan ??
+          (payload.strategy === "mission"
+            ? (payload as unknown as CoworkPlan)
+            : undefined);
+        updateModeMessage("cowork", assistantMessageId, {
+          text:
+            reply ||
+            (plan
+              ? plan.summary
+              : typeof payload.summary === "string"
+                ? payload.summary
+                : "已完成"),
+          streamState: "completed",
+          phase: undefined,
+          plan,
+          detail:
+            payload.streamingSupported === false
+              ? "当前模型已降级为非流式响应"
+              : undefined,
+        });
+      } catch (error) {
+        if (
+          controller.signal.aborted ||
+          (error instanceof DOMException &&
+            error.name === "AbortError")
+        ) {
+          setCoworkQueuePaused(true);
+          setCoworkMessages((items) =>
+            items.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    streamState: "stopped",
+                    phase: undefined,
+                    detail:
+                      message.text
+                        ? "已停止 · 保留已生成内容"
+                        : "已停止 · 画布保持任务前状态，队列已暂停",
+                    text: message.text || "任务已停止",
+                  }
+                : message,
+            ),
+          );
+        } else {
+          updateModeMessage("cowork", assistantMessageId, {
+            error: true,
+            text: "这次没有完成",
+            detail:
+              error instanceof Error
+                ? error.message
+                : "请求失败，请检查模型连接",
+            streamState: "completed",
+            phase: undefined,
+          });
+        }
+      } finally {
+        updateModeMessage("cowork", job.messageId, {
+          queueState: undefined,
+          phase: undefined,
+        });
+        if (coworkAbortRef.current === controller) {
+          coworkAbortRef.current = null;
+        }
+        setActiveAgentJob(null);
+        setIsWorking(false);
+        setCoworkPhase(null);
+        void deleteDesktopAttachments(job.attachments);
+      }
+    },
+    [
+      appendModeMessage,
+      commitHtml,
+      coworkMessages,
+      currentHtml,
+      deleteDesktopAttachments,
+      updateModeMessage,
+    ],
+  );
 
   const executeAgentJob = useCallback(async (job: AgentJob) => {
     const sourceHtml = currentHtml;
@@ -2801,45 +3852,14 @@ export default function Home() {
     });
     setActiveAgentJob(job);
     setIsWorking(true);
+    setCoworkPhase({
+      stage: "preparing",
+      message: "正在准备画布与选区上下文…",
+    });
+    const controller = new AbortController();
+    coworkAbortRef.current = controller;
 
     try {
-      if (job.mode === "chat") {
-        let reply: string;
-        if (job.config.protocol === "demo") {
-          await new Promise((resolve) => window.setTimeout(resolve, 420));
-          reply = selectedContext
-            ? `可以。当前上下文是「${selectedContext.label}」。我们可以先讨论它的信息、视觉层级和交互目标；Chat 模式不会直接修改画布。`
-            : "可以。我们可以从目标用户、信息层级、视觉方向或实现取舍开始讨论；Chat 模式不会直接修改画布。";
-        } else {
-          const response = await fetch("/api/transform", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              mode: "chat",
-              config: job.config,
-              html: sourceHtml,
-              instruction: finalInstruction,
-              selection: selectedContext,
-              attachments: sentAttachments,
-            }),
-          });
-          const payload = (await response.json()) as {
-            reply?: string;
-            error?: string;
-          };
-          if (!response.ok || !payload.reply) {
-            throw new Error(payload.error || "模型没有返回可用的回复");
-          }
-          reply = payload.reply;
-        }
-        appendModeMessage(job.mode, {
-          id: makeId("chat-assistant"),
-          role: "assistant",
-          text: reply,
-        });
-        return;
-      }
-
       let result: CoworkResult;
       if (prepared.insertionRequested && !prepared.insertionExpected) {
         throw new Error("无法确定这个位置的安全插入边界。请缩小圈选范围，或直接选中目标容器后重试。");
@@ -2858,19 +3878,41 @@ export default function Home() {
         };
       } else {
         const requestTransform = async (requestInstruction: string) => {
-          const response = await fetch("/api/transform", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
+          let streamedResult: unknown;
+          await postCanvaslyStream(
+            {
               mode: "cowork",
               config: job.config,
               html: prepared.html,
               instruction: requestInstruction,
+              coworkStrategy: "auto",
               selection: prepared.selection,
               attachments: sentAttachments,
-            }),
-          });
-          const payload = (await response.json()) as {
+            },
+            {
+              onEvent(event) {
+                if (event.type === "phase") {
+                  setCoworkPhase(event.phase);
+                  updateModeMessage("cowork", job.messageId, {
+                    phase: event.phase,
+                  });
+                }
+                if (event.type === "plan") {
+                  updateModeMessage("cowork", job.messageId, {
+                    plan: event.plan,
+                  });
+                }
+                if (event.type === "result") {
+                  streamedResult = event.result;
+                }
+                if (event.type === "error") {
+                  throw new Error(event.message);
+                }
+              },
+            },
+            controller.signal,
+          );
+          const payload = (streamedResult ?? {}) as {
             html?: string;
             summary?: string;
             error?: string;
@@ -2878,10 +3920,8 @@ export default function Home() {
             updates?: string[];
             issues?: string[];
             suggestions?: CoworkSuggestion[];
+            plan?: CoworkPlan;
           };
-          if (!response.ok) {
-            throw new Error(payload.error || "模型没有返回可用的 HTML");
-          }
           const status = payload.status ?? "completed";
           const summary = payload.summary || "已根据描述更新页面";
           const report = {
@@ -2895,6 +3935,11 @@ export default function Home() {
             issues: Array.isArray(payload.issues) ? payload.issues : [],
             suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
           };
+          if (payload.plan) {
+            updateModeMessage("cowork", job.messageId, {
+              plan: payload.plan,
+            });
+          }
           if (status === "blocked") {
             return { ...report, html: "" } as CoworkResult;
           }
@@ -2957,6 +4002,9 @@ export default function Home() {
         }
       }
 
+      if (controller.signal.aborted) {
+        throw new DOMException("Cowork task stopped", "AbortError");
+      }
       if (documentRevisionRef.current !== requestRevision) {
         throw new Error("生成期间画布已发生变化。已保留最新版本，本次 AI 结果未应用。");
       }
@@ -2985,8 +4033,25 @@ export default function Home() {
       });
       showToast(result.status === "partial" ? "已应用部分更新" : "页面已更新");
     } catch (error) {
+      if (
+        controller.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        appendModeMessage("cowork", {
+          id: makeId("cowork-stopped"),
+          role: "assistant",
+          text: "任务已停止",
+          detail: "本次任务没有写入画布，队列已暂停。",
+          streamState: "stopped",
+        });
+        updateModeMessage("cowork", job.messageId, {
+          queueState: undefined,
+          detail: "已停止 · 画布保持任务前状态",
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : "请求失败，请检查模型连接";
-      appendModeMessage(job.mode, {
+      appendModeMessage("cowork", {
         id: makeId("error"),
         role: "assistant",
         text: job.mode === "cowork" ? "这次没有应用修改" : "这次没有完成回复",
@@ -2995,59 +4060,143 @@ export default function Home() {
         report: job.mode === "cowork" ? failureReport(message, finalInstruction) : undefined,
       });
     } finally {
-      updateModeMessage(job.mode, job.messageId, {
+      updateModeMessage("cowork", job.messageId, {
         queueState: undefined,
-        detail: undefined,
+        phase: undefined,
       });
+      if (coworkAbortRef.current === controller) {
+        coworkAbortRef.current = null;
+      }
       setActiveAgentJob(null);
       setIsWorking(false);
+      setCoworkPhase(null);
+      void deleteDesktopAttachments(sentAttachments);
     }
-  }, [appendModeMessage, commitHtml, currentHtml, showToast, updateModeMessage]);
+  }, [
+    appendModeMessage,
+    commitHtml,
+    currentHtml,
+    deleteDesktopAttachments,
+    showToast,
+    updateModeMessage,
+  ]);
 
   useEffect(() => {
-    if (isWorking || activeAgentJob || agentQueue.length === 0) return;
+    if (
+      coworkQueuePaused ||
+      isWorking ||
+      activeAgentJob ||
+      agentQueue.length === 0
+    ) {
+      return;
+    }
     const [nextJob, ...remainingJobs] = agentQueue;
+    const unavailableAttachments = unavailableAttachmentNames(
+      nextJob.attachments,
+    );
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
+      if (unavailableAttachments.length > 0) {
+        const names = unavailableAttachments.slice(0, 3).join("、");
+        setCoworkQueuePaused(true);
+        updateModeMessage("cowork", nextJob.messageId, {
+          queueState: "interrupted",
+          detail: `无法执行 · 附件缺失或损坏：${names}`,
+        });
+        showToast(
+          `任务附件缺失或损坏（${names}），请删除该任务并重新添加附件`,
+        );
+        return;
+      }
       setAgentQueue(remainingJobs);
-      void executeAgentJob(nextJob);
+      void (
+        nextJob.interactionMode
+          ? executeUnifiedAdaptiveJob(nextJob)
+          : executeAgentJob(nextJob)
+      );
     });
     return () => {
       cancelled = true;
     };
-  }, [activeAgentJob, agentQueue, executeAgentJob, isWorking]);
+  }, [
+    activeAgentJob,
+    agentQueue,
+    coworkQueuePaused,
+    executeUnifiedAdaptiveJob,
+    executeAgentJob,
+    isWorking,
+    showToast,
+    updateModeMessage,
+  ]);
 
-  const queueAgentMessage = (priority: AgentJobPriority) => {
-    if (hasStagedMoves && collaborationMode === "cowork") {
+  const queueCoworkMessage = (
+    priority: AgentJobPriority,
+    override?: {
+      instruction: string;
+      attachments?: Attachment[];
+      selection?: SelectionContext | null;
+      handoffCardId?: string;
+    },
+  ) => {
+    if (hasStagedMoves) {
       showToast("请先确认或放弃移动草稿");
       return;
     }
-    const instruction = prompt.trim();
-    if (!instruction && !attachments.length) return;
+    const jobAttachments = override?.attachments ?? attachments;
+    const unpersistedAttachments = window.canvaslyDesktop
+      ? jobAttachments
+          .filter((attachment) => !attachment.desktopReference)
+          .map((attachment) => attachment.name)
+      : [];
+    if (unpersistedAttachments.length > 0) {
+      showToast(
+        `附件尚未安全保存（${unpersistedAttachments
+          .slice(0, 3)
+          .join("、")}），请移除后重新添加`,
+      );
+      return;
+    }
+    const persistedAttachmentBytes = [
+      ...(activeAgentJob?.attachments ?? []),
+      ...agentQueue.flatMap((job) => job.attachments),
+      ...jobAttachments,
+    ].reduce(
+      (total, attachment) =>
+        total + (attachment.sizeBytes ?? 0),
+      0,
+    );
+    if (persistedAttachmentBytes > MAX_PERSISTED_ATTACHMENT_BYTES) {
+      showToast("暂停队列中的附件总量不能超过 32 MB");
+      return;
+    }
+    const instruction = override?.instruction.trim() ?? prompt.trim();
+    if (!instruction && !jobAttachments.length) return;
     const finalInstruction = instruction || "请参考附件优化当前页面。";
     const jobId = makeId("agent-job");
     const messageId = makeId("user");
     const job: AgentJob = {
       id: jobId,
       messageId,
-      mode: collaborationMode,
+      mode: "cowork",
       instruction: finalInstruction,
-      attachments,
-      selection,
+      attachments: jobAttachments,
+      selection: override?.selection ?? selection,
       priority,
       config: { ...modelConfig },
+      handoffCardId: override?.handoffCardId,
+      interactionMode: unifiedMode,
     };
-    const modeHistory = promptHistoryRef.current[collaborationMode];
+    const modeHistory = promptHistoryRef.current.cowork;
     if (modeHistory[modeHistory.length - 1] !== finalInstruction) {
-      promptHistoryRef.current[collaborationMode] = [
+      promptHistoryRef.current.cowork = [
         ...modeHistory,
         finalInstruction,
       ].slice(-50);
     }
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-    appendModeMessage(collaborationMode, {
+    promptHistoryIndexRef.current.cowork = null;
+    promptHistoryDraftRef.current.cowork = "";
+    appendModeMessage("cowork", {
       id: messageId,
       jobId,
       role: "user",
@@ -3063,6 +4212,8 @@ export default function Home() {
           ? "Steer · 当前任务后优先"
           : priority === "queued"
             ? "Queue · 等待执行"
+            : override?.handoffCardId
+              ? "来自 Chat 任务卡"
             : undefined,
     });
     setAgentQueue((jobs) =>
@@ -3073,24 +4224,397 @@ export default function Home() {
     setProjectMenuOpen(false);
   };
 
+  const stopCowork = () => {
+    if (!activeAgentJob || !isWorking) return;
+    setCoworkQueuePaused(true);
+    coworkAbortRef.current?.abort();
+  };
+
+  const resumeCoworkQueue = () => {
+    setCoworkQueuePaused(false);
+  };
+
+  const clearCoworkQueue = () => {
+    const queuedIds = new Set(agentQueue.map((job) => job.messageId));
+    void deleteDesktopAttachments(
+      agentQueue.flatMap((job) => job.attachments),
+    );
+    setAgentQueue([]);
+    setCoworkMessages((items) =>
+      items.filter((item) => !queuedIds.has(item.id)),
+    );
+    setCoworkQueuePaused(false);
+  };
+
+  const updateChatMessage = useCallback(
+    (messageId: string, update: Partial<ChatMessage>) => {
+      setChatMessages((items) =>
+        items.map((item) =>
+          item.id === messageId ? { ...item, ...update } : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  const sendChatMessage = async () => {
+    if (chatIsWorking) return;
+    const instruction = chatPrompt.trim();
+    if (!instruction && !chatAttachments.length) return;
+    const finalInstruction =
+      instruction || "请结合附件提供分析、资料和建议。";
+    const userMessageId = makeId("chat-user");
+    const assistantMessageId = makeId("chat-assistant");
+    const sentAttachments = chatAttachments;
+    const history = [
+      ...chatMessages
+        .filter((message) => !message.id.endsWith("welcome"))
+        .map((message) => ({
+          id: message.id,
+          role: message.role,
+          text: message.text,
+          citations: message.citations,
+        })),
+      {
+        id: userMessageId,
+        role: "user" as const,
+        text: finalInstruction,
+      },
+    ].slice(-30);
+
+    const previousHistory = promptHistoryRef.current.chat;
+    if (previousHistory[previousHistory.length - 1] !== finalInstruction) {
+      promptHistoryRef.current.chat = [
+        ...previousHistory,
+        finalInstruction,
+      ].slice(-50);
+    }
+    promptHistoryIndexRef.current.chat = null;
+    promptHistoryDraftRef.current.chat = "";
+    setChatMessages((items) => [
+      ...items,
+      {
+        id: userMessageId,
+        role: "user",
+        text: finalInstruction,
+      },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        text: "",
+        streamState: "streaming",
+        phase: {
+          stage: "preparing",
+          message: "正在准备对话上下文…",
+        },
+      },
+    ]);
+    setChatPrompt("");
+    setChatAttachments([]);
+    setChatIsWorking(true);
+    setChatPhase({
+      stage: "preparing",
+      message: "正在准备对话上下文…",
+    });
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    try {
+      if (effectiveChatConfig.protocol === "demo") {
+        await new Promise((resolve) => window.setTimeout(resolve, 320));
+        if (controller.signal.aborted) {
+          throw new DOMException("Chat stopped", "AbortError");
+        }
+        const reply = selection
+          ? `当前选择是「${selection.label}」。可以从信息层级、用户目标、视觉表达和实现取舍继续展开；形成明确方向后，可整理成任务卡交给 Cowork。`
+          : "可以从用户目标、信息层级、视觉方向和实现取舍开始讨论；形成明确方向后，可整理成任务卡交给 Cowork。";
+        updateChatMessage(assistantMessageId, {
+          text: reply,
+          streamState: "completed",
+          phase: undefined,
+        });
+      } else {
+        let finalResult: Record<string, unknown> | null = null;
+        await postCanvaslyStream(
+          {
+            mode: "chat",
+            config: { ...effectiveChatConfig },
+            html: currentHtml,
+            instruction: finalInstruction,
+            selection,
+            attachments: sentAttachments,
+            history,
+          },
+          {
+            onEvent(event) {
+              if (event.type === "phase") {
+                setChatPhase(event.phase);
+                updateChatMessage(assistantMessageId, {
+                  phase: event.phase,
+                });
+              }
+              if (event.type === "delta") {
+                setChatMessages((items) =>
+                  items.map((item) =>
+                    item.id === assistantMessageId
+                      ? { ...item, text: `${item.text}${event.text}` }
+                      : item,
+                  ),
+                );
+              }
+              if (event.type === "citation") {
+                setChatMessages((items) =>
+                  items.map((item) => {
+                    if (item.id !== assistantMessageId) return item;
+                    const citations = item.citations ?? [];
+                    return citations.some(
+                      (citation) => citation.id === event.citation.id,
+                    )
+                      ? item
+                      : {
+                          ...item,
+                          citations: [...citations, event.citation],
+                        };
+                  }),
+                );
+              }
+              if (event.type === "result") {
+                finalResult =
+                  event.result && typeof event.result === "object"
+                    ? (event.result as Record<string, unknown>)
+                    : null;
+              }
+              if (event.type === "error") {
+                throw new Error(event.message);
+              }
+            },
+          },
+          controller.signal,
+        );
+        if (controller.signal.aborted) {
+          throw new DOMException("Chat stopped", "AbortError");
+        }
+        setChatMessages((items) =>
+          items.map((item) => {
+            if (item.id !== assistantMessageId) return item;
+            const fallbackReply =
+              finalResult && typeof finalResult.reply === "string"
+                ? finalResult.reply
+                : "";
+            const capabilityNotes = [
+              finalResult?.searchSupported === false
+                ? "当前模型不支持原生联网搜索"
+                : "",
+              finalResult?.streamingSupported === false
+                ? "当前模型已降级为非流式响应"
+                : "",
+            ].filter(Boolean);
+            return {
+              ...item,
+              text: item.text || fallbackReply,
+              streamState: "completed",
+              phase: undefined,
+              detail: capabilityNotes.length
+                ? capabilityNotes.join(" · ")
+                : item.detail,
+            };
+          }),
+        );
+      }
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        updateChatMessage(assistantMessageId, {
+          streamState: "stopped",
+          phase: undefined,
+          detail: "已停止 · 保留已生成内容",
+        });
+      } else {
+        updateChatMessage(assistantMessageId, {
+          error: true,
+          streamState: "completed",
+          phase: undefined,
+          text: "这次没有完成回复",
+          detail:
+            error instanceof Error
+              ? error.message
+              : "请求失败，请检查模型连接",
+        });
+      }
+    } finally {
+      if (chatAbortRef.current === controller) {
+        chatAbortRef.current = null;
+      }
+      setChatIsWorking(false);
+      setChatPhase(null);
+      void deleteDesktopAttachments(sentAttachments);
+    }
+  };
+
+  const stopChat = () => {
+    chatAbortRef.current?.abort();
+  };
+
+  const generateHandoffCard = async (sourceMessageId?: string) => {
+    if (handoffIsWorking || chatIsWorking) return;
+    const sourceIndex = sourceMessageId
+      ? chatMessages.findIndex((message) => message.id === sourceMessageId)
+      : chatMessages.length - 1;
+    const relevantMessages = chatMessages
+      .slice(0, Math.max(0, sourceIndex) + 1)
+      .filter((message) => !message.id.endsWith("welcome"));
+    if (!relevantMessages.length) {
+      showToast("请先在 Chat 中形成一些讨论内容");
+      return;
+    }
+    setHandoffIsWorking(true);
+    const controller = new AbortController();
+    handoffAbortRef.current = controller;
+    try {
+      if (effectiveChatConfig.protocol === "demo") {
+        const latest = relevantMessages[relevantMessages.length - 1];
+        setHandoffDraft({
+          id: makeId("handoff"),
+          title: "来自 Chat 的页面优化任务",
+          objective: latest.text,
+          decisions: [],
+          references: [],
+          constraints: ["保留未明确要求修改的页面内容"],
+          openQuestions: [],
+          instruction: latest.text,
+          sourceMessageIds: relevantMessages.map((message) => message.id),
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+      let streamedResult: unknown;
+      await postCanvaslyStream(
+        {
+          mode: "handoff",
+          config: { ...effectiveChatConfig },
+          html: currentHtml,
+          instruction: "把当前讨论整理为一张可执行的 Cowork 任务卡。",
+          selection,
+          attachments: chatAttachments,
+          history: relevantMessages.map((message) => ({
+            id: message.id,
+            role: message.role,
+            text: message.text,
+            citations: message.citations,
+          })),
+          citations: relevantMessages.flatMap(
+            (message) => message.citations ?? [],
+          ),
+        },
+        {
+          onEvent(event) {
+            if (event.type === "result") streamedResult = event.result;
+            if (event.type === "error") throw new Error(event.message);
+          },
+        },
+        controller.signal,
+      );
+      if (!streamedResult || typeof streamedResult !== "object") {
+        throw new Error("模型没有返回可用的任务卡");
+      }
+      const result = streamedResult as Omit<
+        HandoffCard,
+        "id" | "sourceMessageIds" | "createdAt"
+      >;
+      setHandoffDraft({
+        ...result,
+        id: makeId("handoff"),
+        sourceMessageIds: relevantMessages.map((message) => message.id),
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        showToast(
+          error instanceof Error
+            ? `任务卡生成失败：${error.message}`
+            : "任务卡生成失败",
+        );
+      }
+    } finally {
+      if (handoffAbortRef.current === controller) {
+        handoffAbortRef.current = null;
+      }
+      setHandoffIsWorking(false);
+    }
+  };
+
+  const confirmHandoffCard = () => {
+    if (!handoffDraft) return;
+    const instruction = [
+      `CHAT HANDOFF TASK CARD: ${handoffDraft.title}`,
+      `目标：${handoffDraft.objective}`,
+      handoffDraft.decisions.length
+        ? `已确认决策：\n- ${handoffDraft.decisions.join("\n- ")}`
+        : "",
+      handoffDraft.references.length
+        ? `参考资料：\n${handoffDraft.references
+            .map(
+              (reference) =>
+                `- ${reference.title}${reference.url ? ` (${reference.url})` : ""}: ${reference.note}`,
+            )
+            .join("\n")}`
+        : "",
+      handoffDraft.constraints.length
+        ? `约束：\n- ${handoffDraft.constraints.join("\n- ")}`
+        : "",
+      handoffDraft.openQuestions.length
+        ? `待解决问题：\n- ${handoffDraft.openQuestions.join("\n- ")}`
+        : "",
+      `执行要求：${handoffDraft.instruction}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    queueCoworkMessage("normal", {
+      instruction,
+      handoffCardId: handoffDraft.id,
+    });
+    setChatMessages((items) =>
+      items.map((message) =>
+        handoffDraft.sourceMessageIds.includes(message.id)
+          ? { ...message, handoffCardId: handoffDraft.id }
+          : message,
+      ),
+    );
+    setHandoffCards((cards) => [
+      ...cards.filter((card) => card.id !== handoffDraft.id),
+      handoffDraft,
+    ]);
+    setHandoffDraft(null);
+    setPanelOpen(true);
+    setCoworkPaneOpen(true);
+    setPanelTab("chat");
+    showToast("任务卡已交给 Cowork");
+  };
+
   const removeQueuedJob = (jobId: string) => {
     const job = agentQueue.find((candidate) => candidate.id === jobId);
     if (!job) return;
+    void deleteDesktopAttachments(job.attachments);
     setAgentQueue((jobs) => jobs.filter((candidate) => candidate.id !== jobId));
     const setter = job.mode === "cowork" ? setCoworkMessages : setChatMessages;
     setter((items) => items.filter((item) => item.jobId !== jobId));
   };
 
-  const handlePromptKeydown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handlePromptKeydown = (
+    mode: CollaborationMode,
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ) => {
     if (
-      promptComposingRef.current ||
+      promptComposingRef.current[mode] ||
       event.nativeEvent.isComposing ||
       event.nativeEvent.keyCode === 229
     ) {
       return;
     }
     if (event.key === "ArrowUp") {
-      const history = promptHistoryRef.current[collaborationMode];
+      const history = promptHistoryRef.current[mode];
       const beforeCursor = event.currentTarget.value.slice(
         0,
         event.currentTarget.selectionStart,
@@ -3101,19 +4625,25 @@ export default function Home() {
         !beforeCursor.includes("\n")
       ) {
         event.preventDefault();
-        if (promptHistoryIndexRef.current === null) {
-          promptHistoryDraftRef.current = prompt;
-          promptHistoryIndexRef.current = history.length - 1;
+        if (promptHistoryIndexRef.current[mode] === null) {
+          promptHistoryDraftRef.current[mode] =
+            mode === "cowork" ? prompt : chatPrompt;
+          promptHistoryIndexRef.current[mode] = history.length - 1;
         } else {
-          promptHistoryIndexRef.current = Math.max(
+          promptHistoryIndexRef.current[mode] = Math.max(
             0,
-            promptHistoryIndexRef.current - 1,
+            (promptHistoryIndexRef.current[mode] ?? 1) - 1,
           );
         }
-        const previousPrompt = history[promptHistoryIndexRef.current];
-        setPrompt(previousPrompt);
+        const previousPrompt =
+          history[promptHistoryIndexRef.current[mode] ?? 0];
+        const setter = mode === "cowork" ? setPrompt : setChatPrompt;
+        setter(previousPrompt);
         window.requestAnimationFrame(() => {
-          const textarea = promptRef.current;
+          const textarea =
+            mode === "cowork"
+              ? promptRef.current
+              : chatPromptRef.current;
           if (textarea) {
             textarea.setSelectionRange(
               previousPrompt.length,
@@ -3126,24 +4656,29 @@ export default function Home() {
     }
     if (
       event.key === "ArrowDown" &&
-      promptHistoryIndexRef.current !== null &&
+      promptHistoryIndexRef.current[mode] !== null &&
       event.currentTarget.selectionStart === event.currentTarget.selectionEnd &&
       !event.currentTarget.value
         .slice(event.currentTarget.selectionEnd)
         .includes("\n")
     ) {
       event.preventDefault();
-      const history = promptHistoryRef.current[collaborationMode];
-      const nextIndex = promptHistoryIndexRef.current + 1;
+      const history = promptHistoryRef.current[mode];
+      const nextIndex =
+        (promptHistoryIndexRef.current[mode] ?? -1) + 1;
       const nextPrompt =
         nextIndex >= history.length
-          ? promptHistoryDraftRef.current
+          ? promptHistoryDraftRef.current[mode]
           : history[nextIndex];
-      promptHistoryIndexRef.current =
+      promptHistoryIndexRef.current[mode] =
         nextIndex >= history.length ? null : nextIndex;
-      setPrompt(nextPrompt);
+      const setter = mode === "cowork" ? setPrompt : setChatPrompt;
+      setter(nextPrompt);
       window.requestAnimationFrame(() => {
-        const textarea = promptRef.current;
+        const textarea =
+          mode === "cowork"
+            ? promptRef.current
+            : chatPromptRef.current;
         if (textarea) {
           textarea.setSelectionRange(nextPrompt.length, nextPrompt.length);
         }
@@ -3152,7 +4687,11 @@ export default function Home() {
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      queueAgentMessage(isWorking ? "queued" : "normal");
+      if (mode === "cowork") {
+        queueCoworkMessage(isWorking ? "queued" : "normal");
+      } else if (!chatIsWorking) {
+        void sendChatMessage();
+      }
     }
   };
 
@@ -3171,22 +4710,69 @@ export default function Home() {
   };
 
   const openSettings = () => {
+    modelSettingsTouchedRef.current = true;
     setDraftConfig(modelConfig);
     setSettingsOpen(true);
   };
 
-  const saveSettings = () => {
+  const saveSettings = async () => {
     if (draftConfig.protocol !== "demo" && (!draftConfig.baseUrl || !draftConfig.model)) {
       showToast("请填写节点地址和模型名称");
       return;
     }
+    pendingModelConfigRef.current = draftConfig;
     setModelConfig(draftConfig);
+    desktopPreferencesRef.current = {
+      schemaVersion: 1,
+      modelConfig: {
+        providerId: draftConfig.providerId,
+        protocol: draftConfig.protocol,
+        baseUrl: draftConfig.baseUrl,
+        model: draftConfig.model,
+      },
+      savedAt: new Date().toISOString(),
+    };
+    let credentialPersistFailed = false;
+    const desktop = window.canvaslyDesktop;
+    if (desktop) {
+      const persistCredential = async (
+        slot: "shared-model-api-key" | "chat-model-api-key",
+        value: string,
+      ) =>
+        value
+          ? desktop.writeCredential(slot, value)
+          : desktop.clearCredential(slot);
+      const sharedResult = await persistCredential(
+        "shared-model-api-key",
+        draftConfig.apiKey,
+      );
+      const chatResult = await desktop.clearCredential(
+        "chat-model-api-key",
+      );
+      if (!sharedResult.ok || (chatResult && !chatResult.ok)) {
+        credentialPersistFailed = true;
+        const message = !sharedResult.ok
+          ? sharedResult.error.message
+          : chatResult && !chatResult.ok
+            ? chatResult.error.message
+            : "API key 无法安全保存";
+        setCredentialError(message);
+        showToast(`连接已应用，但 API key 未保存：${message}`);
+      } else {
+        setCredentialError(null);
+        setSharedCredentialSaved(sharedResult.exists);
+      }
+    }
+    setChatOverrideEnabled(false);
+    setChatModelConfig(draftConfig);
     setSettingsOpen(false);
-    showToast(
-      draftConfig.protocol === "demo"
-        ? "已切换到演示模型"
-        : `已连接 ${PROVIDERS.find((item) => item.id === draftConfig.providerId)?.name}`,
-    );
+    if (!credentialPersistFailed) {
+      showToast(
+        draftConfig.protocol === "demo"
+          ? "已切换到演示模型"
+          : `已连接 ${PROVIDERS.find((item) => item.id === draftConfig.providerId)?.name}`,
+      );
+    }
   };
 
   const handleDesktopUpdate = async () => {
@@ -3269,7 +4855,15 @@ export default function Home() {
 
   const applyProjectReplacement = (replacement: ProjectReplacement) => {
     documentRevisionRef.current += 1;
+    chatAbortRef.current?.abort();
+    handoffAbortRef.current?.abort();
+    void deleteDesktopAttachments([
+      ...attachments,
+      ...chatAttachments,
+      ...agentQueue.flatMap((job) => job.attachments),
+    ]);
     setAgentQueue([]);
+    setCoworkQueuePaused(false);
     stagedMovesRef.current.clear();
     setStagedMoves([]);
     setFreeMoveSteps([]);
@@ -3289,8 +4883,12 @@ export default function Home() {
     ]);
     setChatMessages(INITIAL_CHAT_MESSAGES);
     setPrompt("");
+    setChatPrompt("");
     setAttachments([]);
+    setChatAttachments([]);
+    setHandoffDraft(null);
     setPanelOpen(true);
+    setCoworkPaneOpen(true);
     setPanelTab("chat");
     setProjectMenuOpen(false);
     setPendingProject(null);
@@ -3368,8 +4966,16 @@ export default function Home() {
       showToast("请等待当前 Agent 队列完成后再重置");
       return;
     }
+    chatAbortRef.current?.abort();
+    handoffAbortRef.current?.abort();
+    void deleteDesktopAttachments([
+      ...attachments,
+      ...chatAttachments,
+      ...agentQueue.flatMap((job) => job.attachments),
+    ]);
     documentRevisionRef.current += 1;
     setAgentQueue([]);
+    setCoworkQueuePaused(false);
     stagedMovesRef.current.clear();
     setStagedMoves([]);
     setFreeMoveSteps([]);
@@ -3384,13 +4990,512 @@ export default function Home() {
     setCoworkMessages(INITIAL_COWORK_MESSAGES);
     setChatMessages(INITIAL_CHAT_MESSAGES);
     setPrompt("");
+    setChatPrompt("");
     setAttachments([]);
+    setChatAttachments([]);
+    setHandoffDraft(null);
     clearSelection();
     showToast("已恢复项目的初始版本");
   };
 
+  const openAttachmentPicker = (
+    mode: CollaborationMode,
+    kind: "document" | "image",
+  ) => {
+    attachmentTargetRef.current = mode;
+    if (kind === "document") fileInputRef.current?.click();
+    else imageInputRef.current?.click();
+  };
+
+  const renderCitations = (citations: StreamCitation[] | undefined) => {
+    if (!citations?.length) return null;
+    return (
+      <div className="citation-list" aria-label="参考来源">
+        {citations.map((citation, index) => (
+          <a
+            href={citation.url}
+            key={citation.id}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span>{index + 1}</span>
+            <span>
+              <strong>{citation.title}</strong>
+              <small>{new URL(citation.url).hostname}</small>
+            </span>
+            <ArrowUpRight size={12} />
+          </a>
+        ))}
+      </div>
+    );
+  };
+
+  const renderCoworkPlan = (plan: CoworkPlan | undefined) => {
+    if (!plan) return null;
+    return (
+      <details className="cowork-plan" open>
+        <summary>
+          <Sparkles size={12} />
+          <span>
+            <strong>规划执行</strong>
+            <small>{plan.summary}</small>
+          </span>
+          <ChevronDown size={12} />
+        </summary>
+        <div>
+          <p>{plan.objective}</p>
+          <ol>
+            {plan.steps.map((step) => (
+              <li key={step.id}>
+                <span><Check size={10} /></span>
+                <span>
+                  <strong>{step.title}</strong>
+                  <small>{step.description}</small>
+                </span>
+              </li>
+            ))}
+          </ol>
+          {!!plan.assumptions.length && (
+            <section>
+              <strong>合理假设</strong>
+              <ul>
+                {plan.assumptions.map((assumption) => (
+                  <li key={assumption}>{assumption}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {!!plan.acceptanceCriteria.length && (
+            <section>
+              <strong>验收标准</strong>
+              <ul>
+                {plan.acceptanceCriteria.map((criterion) => (
+                  <li key={criterion}>{criterion}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
+      </details>
+    );
+  };
+
+  const renderConversation = (mode: CollaborationMode) => {
+    const modeMessages =
+      mode === "cowork" ? coworkMessages : chatMessages;
+    const working = mode === "cowork" ? isWorking : chatIsWorking;
+    const phase = mode === "cowork" ? coworkPhase : chatPhase;
+    return (
+      <div className="chat-scroll">
+        <div className="context-banner">
+          <div className="ai-orb">
+            <Sparkles size={15} />
+          </div>
+          <div>
+            <span className="agent-label">
+              <i />Canvasly Agent
+            </span>
+            <strong>
+              {unifiedMode === "auto"
+                ? "Auto · 自动判断回答、规划或执行"
+                : unifiedMode === "plan"
+                  ? "Plan · 讨论、搜索和规划，不修改画布"
+                  : "Agent · 执行并原子更新画布"}
+            </strong>
+          </div>
+        </div>
+
+        <div className="message-list">
+          {modeMessages.map((message) => (
+            <article
+              key={message.id}
+              className={`message ${message.role} ${message.error ? "error" : ""} ${message.streamState ?? ""}`}
+            >
+              {message.role === "assistant" && (
+                <span className="message-avatar">
+                  <Sparkles size={14} />
+                </span>
+              )}
+              <div className="message-bubble">
+                <p>
+                  {message.streamState === "streaming" &&
+                    !message.text && <Loader2 className="spin" size={14} />}
+                  {message.text}
+                </p>
+                {message.phase && (
+                  <span className="stream-phase">
+                    <Loader2 className="spin" size={11} />
+                    {message.phase.message}
+                  </span>
+                )}
+                {message.detail && <span>{message.detail}</span>}
+                {renderCoworkPlan(message.plan)}
+                {renderCitations(message.citations)}
+                {message.report && (
+                  <CoworkReportDetails
+                    report={message.report}
+                    onChoose={chooseCoworkSuggestion}
+                  />
+                )}
+                {mode === "cowork" &&
+                  message.role === "assistant" &&
+                  !message.id.endsWith("welcome") &&
+                  !message.error &&
+                  message.report?.status !== "blocked" && (
+                    <button
+                      onClick={undo}
+                      disabled={!canUndo}
+                      type="button"
+                    >
+                      <Undo2 size={12} />撤销这次修改
+                    </button>
+                  )}
+                {mode === "chat" &&
+                  message.role === "assistant" &&
+                  !message.id.endsWith("welcome") &&
+                  message.streamState !== "streaming" &&
+                  !message.error && (
+                    <button
+                      className="handoff-message-button"
+                      onClick={() => {
+                        if (message.handoffCardId) {
+                          const savedCard = handoffCards.find(
+                            (card) =>
+                              card.id === message.handoffCardId,
+                          );
+                          if (savedCard) {
+                            setHandoffDraft(savedCard);
+                            return;
+                          }
+                        }
+                        void generateHandoffCard(message.id);
+                      }}
+                      disabled={handoffIsWorking}
+                      type="button"
+                    >
+                      <ArrowRight size={12} />
+                      {message.handoffCardId
+                        ? "查看已交接任务卡"
+                        : "整理并交给 Cowork"}
+                    </button>
+                  )}
+              </div>
+            </article>
+          ))}
+          {mode === "cowork" && working && (
+            <article className="message assistant working">
+              <span className="message-avatar"><Wand2 size={14} /></span>
+              <div className="message-bubble">
+                <p><Loader2 className="spin" size={14} />{phase?.message ?? "正在理解页面并生成修改…"}</p>
+              </div>
+            </article>
+          )}
+          <div ref={mode === "cowork" ? coworkEndRef : chatEndRef} />
+        </div>
+
+        {modeMessages.length < 3 && (
+          <div className="suggestions">
+            <span>试试这样说</span>
+            <div>
+              {(mode === "cowork"
+                ? unifiedMode === "agent"
+                  ? PROMPT_SUGGESTIONS
+                  : [...CHAT_SUGGESTIONS, "整体优化这个页面并提升转化"]
+                : CHAT_SUGGESTIONS
+              ).map((suggestion) => (
+                <button
+                  key={suggestion}
+                  onClick={() => {
+                    setPrompt(suggestion);
+                    promptRef.current?.focus();
+                  }}
+                  type="button"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderComposer = (mode: CollaborationMode) => {
+    const value = mode === "cowork" ? prompt : chatPrompt;
+    const modeAttachments =
+      mode === "cowork" ? attachments : chatAttachments;
+    const working = mode === "cowork" ? isWorking : chatIsWorking;
+    const modeProvider = mode === "cowork" ? provider : chatProvider;
+    return (
+      <div className={`composer-wrap ${mode}-composer-wrap`}>
+        {mode === "cowork" &&
+          (activeAgentJob || agentQueue.length > 0) && (
+            <div className="agent-followups">
+              {activeAgentJob && (
+                <div className="active-agent-job">
+                  <Loader2 className="spin" size={13} />
+                  <span>
+                    <strong>{coworkPhase?.message ?? "正在处理"}</strong>
+                    <small>{activeAgentJob.instruction}</small>
+                  </span>
+                  <button
+                    className="stop-inline"
+                    onClick={stopCowork}
+                    aria-label="停止 Cowork"
+                    type="button"
+                  >
+                    <Square size={12} />
+                  </button>
+                </div>
+              )}
+              {coworkQueuePaused && agentQueue.length > 0 && (
+                <div className="queue-paused-banner">
+                  <Pause size={13} />
+                  <span>队列已暂停 · {agentQueue.length} 项待办</span>
+                  <button onClick={resumeCoworkQueue} type="button">
+                    <Play size={12} />继续
+                  </button>
+                  <button onClick={clearCoworkQueue} type="button">
+                    清空
+                  </button>
+                </div>
+              )}
+              {agentQueue.map((job, index) => (
+                <div
+                  className={`queued-agent-job ${job.priority}`}
+                  key={job.id}
+                >
+                  {job.priority === "steer" ? (
+                    <Route size={13} />
+                  ) : (
+                    <ListPlus size={13} />
+                  )}
+                  <span>
+                    <strong>
+                      {job.priority === "steer"
+                        ? "Steer"
+                        : `Queue ${index + 1}`}
+                    </strong>
+                    <small>{job.instruction}</small>
+                  </span>
+                  <button
+                    onClick={() => removeQueuedJob(job.id)}
+                    aria-label={`移除 ${job.instruction}`}
+                    type="button"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        {selection && (
+          <div className="selection-chip">
+            {selection.type === "element" ? (
+              <MousePointer2 size={13} />
+            ) : selection.type === "region" ? (
+              <BoxSelect size={13} />
+            ) : (
+              <Pencil size={13} />
+            )}
+            <span>{selection.label}</span>
+            <button
+              onClick={clearSelection}
+              aria-label="移除选择"
+              type="button"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        {!!modeAttachments.length && (
+          <div className="attachment-list">
+            {modeAttachments.map((attachment) => (
+              <div className="attachment-chip" key={attachment.id}>
+                {attachment.kind === "image" && attachment.data ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={attachment.data} alt="" />
+                ) : (
+                  <FileText size={16} />
+                )}
+                <span>
+                  <strong>{attachment.name}</strong>
+                  <small>{attachment.sizeLabel}</small>
+                </span>
+                <button
+                  onClick={() =>
+                    removeAttachment(mode, attachment.id)
+                  }
+                  aria-label={`移除 ${attachment.name}`}
+                  type="button"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="composer">
+          <textarea
+            ref={mode === "cowork" ? promptRef : chatPromptRef}
+            value={value}
+            onChange={(event) => {
+              if (mode === "cowork") setPrompt(event.target.value);
+              else setChatPrompt(event.target.value);
+              promptHistoryIndexRef.current[mode] = null;
+              promptHistoryDraftRef.current[mode] = "";
+            }}
+            onCompositionStart={() => {
+              promptComposingRef.current[mode] = true;
+            }}
+            onCompositionEnd={() => {
+              promptComposingRef.current[mode] = false;
+            }}
+            onBlur={() => {
+              promptComposingRef.current[mode] = false;
+            }}
+            onKeyDown={(event) => handlePromptKeydown(mode, event)}
+            placeholder={
+              unifiedMode === "auto"
+                ? "提问、讨论或描述你想完成的目标…"
+                : unifiedMode === "plan"
+                  ? "讨论需求、搜索资料或制定方案…"
+                  : selection
+                    ? "描述你希望 Agent 如何修改这里…"
+                    : "描述你想让 Agent 执行的页面修改…"
+            }
+            rows={3}
+          />
+          <div className="composer-actions">
+            <div>
+              <button
+                onClick={() =>
+                  openAttachmentPicker(mode, "document")
+                }
+                aria-label="添加文档"
+                title="添加文本、Markdown、HTML 或 CSS"
+                type="button"
+              >
+                <Paperclip size={17} />
+              </button>
+              <button
+                onClick={() => openAttachmentPicker(mode, "image")}
+                aria-label="添加参考图"
+                title="添加参考图"
+                type="button"
+              >
+                <ImageIcon size={17} />
+              </button>
+            </div>
+            {mode === "cowork" ? (
+              working ? (
+                <div className="followup-actions">
+                  <button
+                    className="stop-button"
+                    onClick={stopCowork}
+                    aria-label="停止当前任务"
+                    type="button"
+                  >
+                    <Square size={14} /><span>停止</span>
+                  </button>
+                  <button
+                    className="queue-button"
+                    onClick={() => queueCoworkMessage("queued")}
+                    disabled={
+                      hasStagedMoves ||
+                      (!prompt.trim() && !attachments.length)
+                    }
+                    aria-label="加入队列"
+                    type="button"
+                  >
+                    <ListPlus size={15} /><span>Queue</span>
+                  </button>
+                  <button
+                    className="steer-button"
+                    onClick={() => queueCoworkMessage("steer")}
+                    disabled={
+                      hasStagedMoves ||
+                      (!prompt.trim() && !attachments.length)
+                    }
+                    aria-label="优先跟进"
+                    type="button"
+                  >
+                    <Route size={15} /><span>Steer</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="send-button"
+                  onClick={() => queueCoworkMessage("normal")}
+                  disabled={
+                    hasStagedMoves ||
+                    (!prompt.trim() && !attachments.length)
+                  }
+                  aria-label="发送"
+                  type="button"
+                >
+                  <Send size={17} />
+                </button>
+              )
+            ) : working ? (
+              <button
+                className="stop-button"
+                onClick={stopChat}
+                aria-label="停止 Chat"
+                type="button"
+              >
+                <Square size={14} /><span>停止</span>
+              </button>
+            ) : (
+              <button
+                className="send-button"
+                onClick={() => void sendChatMessage()}
+                disabled={!chatPrompt.trim() && !chatAttachments.length}
+                aria-label="发送 Chat"
+                type="button"
+              >
+                <Send size={17} />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="composer-meta">
+          <button onClick={openSettings} type="button">
+            <span
+              className="provider-mini"
+              style={{ background: modeProvider.color }}
+            />
+            {modeProvider.name}<ChevronDown size={12} />
+          </button>
+          <span>
+            {unifiedMode === "auto"
+              ? "自动路由"
+              : unifiedMode === "plan"
+                ? "只规划"
+                : selection
+                  ? "执行 · 当前目标"
+                  : "执行 · 完整页面"}
+          </span>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${desktopHydrating ? "desktop-hydrating" : ""}`}
+      aria-busy={desktopHydrating}
+    >
+      {desktopHydrating && (
+        <div className="desktop-hydration-status" role="status">
+          <Loader2 className="spin" size={18} />
+          <span>
+            <strong>正在恢复 Canvasly</strong>
+            <small>加载项目、对话和暂停任务…</small>
+          </span>
+        </div>
+      )}
       <header className="topbar">
         <div className="brand-lockup">
           <span className="app-mark"><span /></span>
@@ -3466,16 +5571,30 @@ export default function Home() {
           <button className="primary-action" onClick={exportHtml} type="button"><Download size={15} />导出 HTML</button>
           <button
             className="icon-action panel-toggle"
-            onClick={() => setPanelOpen((open) => !open)}
-            aria-label={panelOpen ? "收起 AI 面板" : "打开 AI 面板"}
+            onClick={() => {
+              if (collaborationDockOpen) {
+                setPanelOpen(false);
+              } else {
+                setPanelOpen(true);
+                setCoworkPaneOpen(true);
+              }
+            }}
+            aria-label={collaborationDockOpen ? "收起协作面板" : "打开协作面板"}
             type="button"
           >
-            {panelOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+            {collaborationDockOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
           </button>
         </div>
       </header>
 
-      <div className={`workspace ${panelOpen ? "" : "panel-collapsed"}`}>
+      <div
+        className={`workspace ${collaborationDockOpen ? "" : "panel-collapsed"}`}
+        style={
+          {
+            "--dock-width": `${collaborationDockWidth}px`,
+          } as CSSProperties
+        }
+      >
         <aside className="tool-rail" aria-label="画布工具">
           <div className="tool-group">
             <ToolButton active={toolMode === "interact"} label="操作页面" shortcut="P" onClick={() => activateTool("interact")}><Hand size={18} /></ToolButton>
@@ -3486,8 +5605,8 @@ export default function Home() {
           </div>
           <span className="rail-divider" />
           <div className="tool-group">
-            <button className="tool-button" onClick={() => imageInputRef.current?.click()} aria-label="上传参考图" title="上传参考图" type="button"><ImagePlus size={19} /></button>
-            <button className="tool-button" onClick={() => { setPanelOpen(true); setPanelTab("code"); }} aria-label="查看 HTML" title="查看 HTML" type="button"><Code2 size={19} /></button>
+            <button className="tool-button" onClick={() => openAttachmentPicker("cowork", "image")} aria-label="上传参考图" title="上传参考图" type="button"><ImagePlus size={19} /></button>
+            <button className="tool-button" onClick={() => { setPanelOpen(true); setCoworkPaneOpen(true); setPanelTab("code"); }} aria-label="查看 HTML" title="查看 HTML" type="button"><Code2 size={19} /></button>
           </div>
           <div className="rail-bottom">
             <button className="tool-button" onClick={openSettings} aria-label="模型设置" title="模型设置" type="button"><Settings2 size={19} /></button>
@@ -3666,239 +5785,169 @@ export default function Home() {
           </div>
         </section>
 
-        <aside className={`ai-panel ${panelOpen ? "open" : ""}`}>
-          <div className="panel-header">
-            <div className="collaboration-switch" role="group" aria-label="协作模式">
-              <button
-                className={collaborationMode === "cowork" ? "active" : ""}
-                onClick={() => switchCollaborationMode("cowork")}
-                type="button"
-              >
-                <Wand2 size={14} />Cowork
-              </button>
-              <button
-                className={collaborationMode === "chat" ? "active" : ""}
-                onClick={() => switchCollaborationMode("chat")}
-                type="button"
-              >
-                <MessageSquare size={14} />Chat
-              </button>
-            </div>
-            <div className="panel-header-actions">
-              {collaborationMode === "cowork" && (
-                <button
-                  className={`code-view-toggle ${panelTab === "code" ? "active" : ""}`}
-                  onClick={() => setPanelTab((tab) => tab === "code" ? "chat" : "code")}
-                  aria-label={panelTab === "code" ? "返回 Cowork" : "查看 HTML"}
-                  title={panelTab === "code" ? "返回 Cowork" : "查看 HTML"}
-                  type="button"
+        <aside
+          className={`collaboration-dock unified ${collaborationDockOpen ? "open" : ""}`}
+          aria-label="Canvasly 协作面板"
+        >
+          <button
+            className="dock-edge-resizer"
+            onPointerDown={(event) =>
+              beginPaneResize("cowork", event)
+            }
+            aria-label="调整协作侧栏宽度"
+            title="拖动调整协作侧栏宽度"
+            type="button"
+          />
+          {coworkPaneOpen && (
+            <section
+              className="assistant-pane cowork-pane unified-pane mobile-active"
+              style={{ width: coworkPaneWidth }}
+            >
+              <header className="panel-header">
+                <div className="pane-title">
+                  <span><Sparkles size={14} /></span>
+                  <div><strong>Canvasly Agent</strong><small>边聊边工作</small></div>
+                </div>
+                <div
+                  className="unified-mode-switch"
+                  role="group"
+                  aria-label="协作模式"
                 >
-                  <Code2 size={16} />
-                </button>
-              )}
-              <button className="panel-close" onClick={() => setPanelOpen(false)} aria-label="关闭面板" type="button"><X size={17} /></button>
-            </div>
-          </div>
-
-          {panelTab === "chat" ? (
-            <>
-              <div className="chat-scroll">
-                <div className="context-banner">
-                  <div className="ai-orb"><Sparkles size={15} /></div>
-                  <div>
-                    <span className="agent-label"><i />Canvasly {collaborationMode === "cowork" ? "Cowork" : "Chat"}</span>
-                    <strong>
-                      {collaborationMode === "cowork"
-                        ? "画布上下文已同步"
-                        : "对话模式 · 不修改画布"}
-                    </strong>
-                  </div>
-                </div>
-
-                <div className="message-list">
-                  {messages.map((message) => (
-                    <article key={message.id} className={`message ${message.role} ${message.error ? "error" : ""}`}>
-                      {message.role === "assistant" && <span className="message-avatar"><Wand2 size={14} /></span>}
-                      <div className="message-bubble">
-                        <p>{message.text}</p>
-                        {message.detail && <span>{message.detail}</span>}
-                        {message.report && (
-                          <CoworkReportDetails
-                            report={message.report}
-                            onChoose={chooseCoworkSuggestion}
-                          />
-                        )}
-                        {collaborationMode === "cowork" && message.role === "assistant" && !message.id.endsWith("welcome") && !message.error && message.report?.status !== "blocked" && (
-                          <button onClick={undo} disabled={!canUndo} type="button"><Undo2 size={12} />撤销这次修改</button>
-                        )}
-                      </div>
-                    </article>
+                  {(
+                    [
+                      ["auto", "Auto"],
+                      ["plan", "Plan"],
+                      ["agent", "Agent"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      className={unifiedMode === mode ? "active" : ""}
+                      onClick={() => setUnifiedMode(mode)}
+                      title={
+                        mode === "auto"
+                          ? "模型自动判断回答、规划或执行"
+                          : mode === "plan"
+                            ? "只讨论和规划，不修改画布"
+                            : "执行页面修改"
+                      }
+                      type="button"
+                      key={mode}
+                    >
+                      {label}
+                    </button>
                   ))}
-                  {isWorking && activeAgentJob?.mode === collaborationMode && (
-                    <article className="message assistant working">
-                      <span className="message-avatar"><Wand2 size={14} /></span>
-                      <div className="message-bubble"><p><Loader2 className="spin" size={14} />{collaborationMode === "cowork" ? "正在理解页面并生成修改…" : "正在思考并组织回复…"}</p></div>
-                    </article>
+                </div>
+                <div className="panel-header-actions">
+                  {isWorking && (
+                    <button
+                      className="pane-stop"
+                      onClick={stopCowork}
+                      aria-label="停止当前任务"
+                      title="停止当前任务；未提交的画布修改会丢弃"
+                      type="button"
+                    >
+                      <Square size={14} />
+                    </button>
                   )}
-                  <div ref={chatEndRef} />
-                </div>
-
-                {messages.length < 3 && (
-                  <div className="suggestions">
-                    <span>试试这样说</span>
-                    <div>
-                      {(collaborationMode === "cowork" ? PROMPT_SUGGESTIONS : CHAT_SUGGESTIONS).map((suggestion) => (
-                        <button key={suggestion} onClick={() => { setPrompt(suggestion); promptRef.current?.focus(); }} type="button">{suggestion}</button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="composer-wrap">
-                {(activeAgentJob?.mode === collaborationMode ||
-                  agentQueue.some((job) => job.mode === collaborationMode)) && (
-                  <div className="agent-followups">
-                    {activeAgentJob?.mode === collaborationMode && (
-                      <div className="active-agent-job">
-                        <Loader2 className="spin" size={13} />
-                        <span>
-                          <strong>正在处理</strong>
-                          <small>{activeAgentJob.instruction}</small>
-                        </span>
-                      </div>
-                    )}
-                    {agentQueue
-                      .filter((job) => job.mode === collaborationMode)
-                      .map((job) => (
-                        <div className={`queued-agent-job ${job.priority}`} key={job.id}>
-                          {job.priority === "steer" ? <Route size={13} /> : <ListPlus size={13} />}
-                          <span>
-                            <strong>{job.priority === "steer" ? "Steer" : `Queue ${agentQueue.indexOf(job) + 1}`}</strong>
-                            <small>{job.instruction}</small>
-                          </span>
-                          <button onClick={() => removeQueuedJob(job.id)} aria-label={`移除 ${job.instruction}`} type="button"><X size={12} /></button>
-                        </div>
-                      ))}
-                  </div>
-                )}
-                {selection && (
-                  <div className="selection-chip">
-                    {selection.type === "element" ? <MousePointer2 size={13} /> : selection.type === "region" ? <BoxSelect size={13} /> : <Pencil size={13} />}
-                    <span>{selection.label}</span>
-                    <button onClick={clearSelection} aria-label="移除选择" type="button"><X size={13} /></button>
-                  </div>
-                )}
-                {!!attachments.length && (
-                  <div className="attachment-list">
-                    {attachments.map((attachment) => (
-                      <div className="attachment-chip" key={attachment.id}>
-                        {attachment.kind === "image" && attachment.data ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={attachment.data} alt="" />
-                        ) : <FileText size={16} />}
-                        <span><strong>{attachment.name}</strong><small>{attachment.sizeLabel}</small></span>
-                        <button onClick={() => removeAttachment(attachment.id)} aria-label={`移除 ${attachment.name}`} type="button"><X size={12} /></button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="composer">
-                  <textarea
-                    ref={promptRef}
-                    value={prompt}
-                    onChange={(event) => {
-                      setPrompt(event.target.value);
-                      promptHistoryIndexRef.current = null;
-                      promptHistoryDraftRef.current = "";
-                    }}
-                    onCompositionStart={() => {
-                      promptComposingRef.current = true;
-                    }}
-                    onCompositionEnd={() => {
-                      promptComposingRef.current = false;
-                    }}
-                    onBlur={() => {
-                      promptComposingRef.current = false;
-                    }}
-                    onKeyDown={handlePromptKeydown}
-                    placeholder={
-                      collaborationMode === "chat"
-                        ? selection
-                          ? "聊聊当前选择，或询问设计建议…"
-                          : "讨论页面、内容、方向或实现取舍…"
-                        : selection
-                          ? "描述你希望如何修改这里…"
-                          : "描述你想要的页面修改…"
+                  <button
+                    className={`code-view-toggle ${panelTab === "code" ? "active" : ""}`}
+                    onClick={() =>
+                      setPanelTab((tab) =>
+                        tab === "code" ? "chat" : "code"
+                      )
                     }
-                    rows={3}
-                  />
-                  <div className="composer-actions">
+                    aria-label={
+                      panelTab === "code" ? "返回对话" : "查看 HTML"
+                    }
+                    type="button"
+                  >
+                    <Code2 size={16} />
+                  </button>
+                  <button
+                    className="panel-close"
+                    onClick={() => {
+                      setCoworkPaneOpen(false);
+                      setPanelOpen(false);
+                    }}
+                    aria-label="折叠协作侧栏"
+                    type="button"
+                  >
+                    <X size={17} />
+                  </button>
+                </div>
+              </header>
+              {panelTab === "chat" ? (
+                <>
+                  {renderConversation("cowork")}
+                  {renderComposer("cowork")}
+                </>
+              ) : (
+                <div className="code-panel">
+                  <div className="code-toolbar">
                     <div>
-                      <button onClick={() => fileInputRef.current?.click()} aria-label="添加文档" title="添加文本、Markdown、HTML 或 CSS" type="button"><Paperclip size={17} /></button>
-                      <button onClick={() => imageInputRef.current?.click()} aria-label="添加参考图" title="添加参考图" type="button"><ImageIcon size={17} /></button>
+                      <span className="code-language">HTML</span>
+                      <span>{codeDraft.length.toLocaleString()} 字符</span>
                     </div>
-                    {isWorking ? (
-                      <div className="followup-actions">
-                        <button
-                          className="queue-button"
-                          onClick={() => queueAgentMessage("queued")}
-                          disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)}
-                          aria-label="加入队列"
-                          title="当前任务完成后按顺序执行"
-                          type="button"
-                        >
-                          <ListPlus size={15} /><span>Queue</span>
-                        </button>
-                        <button
-                          className="steer-button"
-                          onClick={() => queueAgentMessage("steer")}
-                          disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)}
-                          aria-label="优先跟进"
-                          title="当前任务完成后优先执行"
-                          type="button"
-                        >
-                          <Route size={15} /><span>Steer</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <button className="send-button" onClick={() => queueAgentMessage("normal")} disabled={(collaborationMode === "cowork" && hasStagedMoves) || (!prompt.trim() && !attachments.length)} aria-label="发送" type="button">
-                        <Send size={17} />
-                      </button>
-                    )}
+                    <button onClick={() => void copyCode()} type="button">
+                      <Copy size={14} />复制
+                    </button>
+                  </div>
+                  <textarea
+                    value={codeDraft}
+                    onChange={(event) => {
+                      documentRevisionRef.current += 1;
+                      activateTool("select");
+                      setCodeDraft(event.target.value);
+                    }}
+                    spellCheck={false}
+                    aria-label="HTML 源码"
+                    disabled={hasStagedMoves}
+                  />
+                  <div className="code-footer">
+                    <button
+                      className="ghost-code"
+                      onClick={() => setCodeDraft(currentHtml)}
+                      type="button"
+                    >
+                      <Trash2 size={14} />放弃修改
+                    </button>
+                    <button
+                      className="apply-code"
+                      onClick={() => {
+                        if (hasStagedMoves) {
+                          showToast("请先确认或放弃移动草稿");
+                          return;
+                        }
+                        commitHtml(
+                          codeDraft,
+                          !hasRenderableBodyContent(codeDraft),
+                        );
+                        showToast("代码已应用");
+                      }}
+                      disabled={
+                        hasStagedMoves || codeDraft === currentHtml
+                      }
+                      type="button"
+                    >
+                      <Check size={14} />应用到画布
+                    </button>
                   </div>
                 </div>
-                <div className="composer-meta">
-                  <button onClick={openSettings} type="button">
-                    <span className="provider-mini" style={{ background: provider.color }} />
-                    {provider.name}<ChevronDown size={12} />
-                  </button>
-                  <span>{collaborationMode === "cowork" ? "Cowork" : "Chat"} · {selection ? "当前目标" : "完整页面"}</span>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="code-panel">
-              <div className="code-toolbar">
-                <div><span className="code-language">HTML</span><span>{codeDraft.length.toLocaleString()} 字符</span></div>
-                <button onClick={() => void copyCode()} type="button"><Copy size={14} />复制</button>
-              </div>
-              <textarea
-                value={codeDraft}
-                onChange={(event) => {
-                  documentRevisionRef.current += 1;
-                  activateTool("select");
-                  setCodeDraft(event.target.value);
-                }}
-                spellCheck={false}
-                aria-label="HTML 源码"
-                disabled={hasStagedMoves}
-              />
-              <div className="code-footer">
-                <button className="ghost-code" onClick={() => setCodeDraft(currentHtml)} type="button"><Trash2 size={14} />放弃修改</button>
-                <button className="apply-code" onClick={() => { if (hasStagedMoves) { showToast("请先确认或放弃移动草稿"); return; } commitHtml(codeDraft, !hasRenderableBodyContent(codeDraft)); showToast("代码已应用"); }} disabled={hasStagedMoves || codeDraft === currentHtml} type="button"><Check size={14} />应用到画布</button>
-              </div>
-            </div>
+              )}
+            </section>
+          )}
+          {!coworkPaneOpen && (
+            <button
+              className="collapsed-pane-launcher unified"
+              onClick={() => {
+                setCoworkPaneOpen(true);
+                setPanelOpen(true);
+              }}
+              aria-label="展开协作侧栏"
+              type="button"
+            >
+              <Sparkles size={15} />Agent
+            </button>
           )}
         </aside>
       </div>
@@ -3998,7 +6047,7 @@ export default function Home() {
                     <input value={draftConfig.model} onChange={(event) => setDraftConfig((config) => ({ ...config, model: event.target.value }))} placeholder="model-name" autoComplete="off" />
                   </label>
                   <label>
-                    <span>API 密钥 <small>仅保留在当前会话</small></span>
+                    <span>API 密钥 <small>{desktopInfo ? sharedCredentialSaved ? "已通过系统加密保存" : "保存后写入系统凭据" : "仅保留在当前会话"}</small></span>
                     <input type="password" value={draftConfig.apiKey} onChange={(event) => setDraftConfig((config) => ({ ...config, apiKey: event.target.value }))} placeholder={PROVIDERS.find((item) => item.id === draftConfig.providerId)?.keyPlaceholder} autoComplete="off" />
                   </label>
                   {(draftConfig.providerId === "local" || draftConfig.providerId === "copilot" || draftConfig.providerId === "custom") && (
@@ -4057,15 +6106,214 @@ export default function Home() {
                       ? `项目自动保存不可用：${desktopPersistenceError}`
                       : `项目与版本历史已自动保存在此电脑${desktopSavedAt ? ` · ${new Date(desktopSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
                     }
-                    ；API 密钥不会保存
+                    ；API 密钥由系统凭据加密保存
                   </small>
                 </section>
               )}
             </div>
 
             <footer>
-              <span><span className="privacy-dot" />密钥不会写入浏览器存储或项目文件</span>
-              <div><button className="modal-cancel" onClick={() => setSettingsOpen(false)} type="button">取消</button><button className="modal-save" onClick={saveSettings} type="button">保存连接</button></div>
+              <span><span className="privacy-dot" />{desktopInfo ? credentialError ? `密钥保存异常：${credentialError}` : "密钥使用 Keychain / DPAPI 加密，不写入项目文件" : "密钥仅在当前会话，不写入浏览器存储"}</span>
+              <div><button className="modal-cancel" onClick={() => setSettingsOpen(false)} type="button">取消</button><button className="modal-save" onClick={() => void saveSettings()} type="button">保存连接</button></div>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {handoffDraft && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setHandoffDraft(null);
+            }
+          }}
+        >
+          <section
+            className="handoff-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="handoff-title"
+          >
+            <header>
+              <div>
+                <span className="modal-icon"><ArrowRight size={18} /></span>
+                <div>
+                  <h2 id="handoff-title">Chat → Cowork 任务卡</h2>
+                  <p>确认 Cowork 唯一会接收到的讨论结论。</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setHandoffDraft(null)}
+                aria-label="关闭任务卡"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="handoff-body">
+              <label>
+                <span>任务标题</span>
+                <input
+                  value={handoffDraft.title}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? { ...card, title: event.target.value }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                <span>目标</span>
+                <textarea
+                  value={handoffDraft.objective}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? { ...card, objective: event.target.value }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                <span>已确认决策 <small>每行一项</small></span>
+                <textarea
+                  value={handoffDraft.decisions.join("\n")}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? {
+                            ...card,
+                            decisions: event.target.value
+                              .split("\n")
+                              .map((item) => item.trim())
+                              .filter(Boolean),
+                          }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                <span>约束 <small>每行一项</small></span>
+                <textarea
+                  value={handoffDraft.constraints.join("\n")}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? {
+                            ...card,
+                            constraints: event.target.value
+                              .split("\n")
+                              .map((item) => item.trim())
+                              .filter(Boolean),
+                          }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+              {!!handoffDraft.references.length && (
+                <div className="handoff-references">
+                  <span>参考资料</span>
+                  {handoffDraft.references.map((reference, index) => (
+                    <div key={`${reference.title}-${index}`}>
+                      <BookOpen size={13} />
+                      <span>
+                        <strong>{reference.title}</strong>
+                        <small>{reference.note}</small>
+                      </span>
+                      {reference.url && (
+                        <a
+                          href={reference.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label={`打开 ${reference.title}`}
+                        >
+                          <ArrowUpRight size={13} />
+                        </a>
+                      )}
+                      <button
+                        onClick={() =>
+                          setHandoffDraft((card) =>
+                            card
+                              ? {
+                                  ...card,
+                                  references: card.references.filter(
+                                    (_, itemIndex) => itemIndex !== index,
+                                  ),
+                                }
+                              : card,
+                          )
+                        }
+                        aria-label={`移除 ${reference.title}`}
+                        type="button"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <label>
+                <span>待解决问题 <small>每行一项</small></span>
+                <textarea
+                  value={handoffDraft.openQuestions.join("\n")}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? {
+                            ...card,
+                            openQuestions: event.target.value
+                              .split("\n")
+                              .map((item) => item.trim())
+                              .filter(Boolean),
+                          }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                <span>Cowork 执行要求</span>
+                <textarea
+                  className="handoff-instruction"
+                  value={handoffDraft.instruction}
+                  onChange={(event) =>
+                    setHandoffDraft((card) =>
+                      card
+                        ? { ...card, instruction: event.target.value }
+                        : card,
+                    )
+                  }
+                />
+              </label>
+            </div>
+            <footer>
+              <span>Chat 原始对话不会进入 Cowork 上下文</span>
+              <div>
+                <button
+                  className="modal-cancel"
+                  onClick={() => setHandoffDraft(null)}
+                  type="button"
+                >
+                  继续讨论
+                </button>
+                <button
+                  className="modal-save"
+                  onClick={confirmHandoffCard}
+                  disabled={
+                    !handoffDraft.objective.trim() ||
+                    !handoffDraft.instruction.trim()
+                  }
+                  type="button"
+                >
+                  交给 Cowork
+                </button>
+              </div>
             </footer>
           </section>
         </div>

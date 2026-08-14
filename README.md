@@ -30,9 +30,10 @@
 
 Most AI website tools keep you outside the work: describe a change, wait, inspect a result, repeat. Canvasly puts the human, the model, and the actual page on one shared canvas.
 
-- **Chat before changing anything.** Discuss direction, hierarchy, content, and trade-offs without touching the canvas.
+- **One conversation that can talk and work.** Like Codex or Claude Code, discuss, search, plan, and execute real HTML changes in one sidebar.
 - **Cowork on real HTML.** Select an element, circle a region, sketch an intention, or attach references—then apply a reviewed full-document edit.
-- **Keep steering the agent.** Type while a task runs. Use **Steer** for the next priority or **Queue** for ordered follow-ups.
+- **Let the model choose the depth.** Auto decides whether to answer, plan, or execute. Plan never edits the canvas; Agent focuses on delivery.
+- **Keep steering the agent.** Use **Steer** or **Queue** for Cowork follow-ups while continuing to talk in Chat.
 - **Work directly on the page.** Interact with buttons and inputs, visually select DOM elements, and freely position multiple components before one confirmed render.
 - **Stay in control.** Preview every movement, undo individual staging steps, discard a batch, or revert the final rendered version.
 
@@ -42,19 +43,21 @@ Most AI website tools keep you outside the work: describe a change, wait, inspec
 
 <img src="./docs/assets/canvasly-overview.png" alt="Canvasly Cowork workspace" width="100%" />
 
-### Two modes with different promises
+### Auto / Plan / Agent in one continuous context
 
-| Cowork | Chat |
+| Mode | Promise |
 | --- | --- |
-| Generates and applies reviewed HTML edits. | Discusses the page without modifying it. |
-| Selection, region, drawing, references, source editing. | Product thinking, visual critique, information architecture. |
-| Creates version history with undo and redo. | Keeps a separate conversation history. |
+| Auto | The model uses conversation and page context to choose answer, plan, or execution. |
+| Plan | Streams discussion, native research, citations, and a structured plan without editing the canvas. |
+| Agent | Executes local or high-level goals, planning first when useful, then atomically applies reviewed HTML. |
 
 <img src="./docs/assets/canvasly-chat.png" alt="Canvasly Chat mode" width="100%" />
 
+The sidebar is resizable and collapsible. **Steer** and **Queue** remain available while work runs. Stopping an answer preserves received text; stopping execution discards its uncommitted draft, preserves the checkpoint, and pauses queued work.
+
 ### Agent-style follow-ups
 
-The composer never locks while a task is running. **Steer** moves an instruction to the front of the follow-up queue; **Queue** keeps FIFO order. Each Cowork job starts from the latest completed HTML, so changes accumulate instead of overwriting one another.
+**Steer** moves an instruction to the front of the Cowork follow-up queue; **Queue** keeps FIFO order. Stopping Cowork cancels the active draft, keeps the pre-task checkpoint, and pauses pending work. Each Cowork job starts from the latest completed HTML, so changes accumulate instead of overwriting one another.
 
 <img src="./docs/assets/canvasly-agent-queue.png" alt="Canvasly Steer and Queue workflow" width="100%" />
 
@@ -76,16 +79,18 @@ The canvas auto-fits around open panels. Hover over the canvas and pinch, or use
 
 | Area | Capabilities |
 | --- | --- |
-| Collaboration | Cowork / Chat modes, independent histories, Agent status |
+| Collaboration | One Auto / Plan / Agent conversation with model routing |
+| Streaming | Chat tokens and citations, Cowork phase status, independent stop controls |
+| Research | Native model Web Search capability detection and safe clickable citations |
 | Execution reports | Applied updates, partial or blocked reasons, selectable recovery options |
-| Follow-ups | Editable composer while running, Steer, Queue, removable jobs |
+| Follow-ups | Steer, Queue, pause/resume/clear, stop-and-rollback |
 | Prompt workflow | `↑` / `↓` terminal-style history per mode, unsent draft restore |
 | Visual targeting | DOM selection, region selection, freehand annotation |
 | Direct manipulation | Native page interaction, multi-component free movement, batch confirmation |
 | Safe navigation | Working in-page anchors and external links, diagnostics for inert controls |
 | Canvas | Auto-fit, pointer-centered local zoom, desktop/tablet/mobile sizes |
 | Inputs | Images, HTML, CSS, Markdown, JSON, source code, text references |
-| Recovery | Up to 30 in-session versions, undo, redo, reset, batch rollback |
+| Recovery | Up to 30 versions plus desktop recovery of conversation, plans, citations, and paused queue |
 | Delivery | Full HTML source editor, copy, standalone `.html` export |
 
 ## Quick start
@@ -97,7 +102,7 @@ Download the installer for your system from [GitHub Releases](https://github.com
 - **macOS:** download the `.dmg`, open it, and drag Canvasly into Applications. Apple silicon and Intel Macs are supported.
 - **Windows 10 / 11:** download and run the `.exe` whose name starts with `Canvasly-Setup-`.
 
-The desktop app includes its local service, so **Docker, Node.js, and Git are not required**. It automatically saves the project, up to 30 versions, and the last provider, protocol, endpoint, and model name on this computer; API keys remain only in the current app session. If a bad result empties the canvas, startup restores the latest visible version while retaining a separate source draft. **Restore starter page** is also available in the project menu.
+The desktop app includes its local service, so **Docker, Node.js, and Git are not required**. It automatically saves the project, up to 30 versions, unified conversation, plans, citations, attachments, paused queue, sidebar width, and model configuration. The API key is encrypted through macOS Keychain / Windows DPAPI; browser and Docker keys remain session-only. If a bad result empties the canvas, startup restores the latest visible version while retaining a separate source draft. **Restore starter page** is also available in the project menu.
 
 #### In-app updates
 
@@ -251,7 +256,7 @@ Configure these GitHub Actions secrets for production signing:
 
 ## Connect a model
 
-Open model settings in the editor. The desktop app remembers the provider, protocol, endpoint, and model name. Credentials stay in the current app session and are sent only to the Canvasly server handling that request.
+Open model settings in the editor. The desktop app remembers provider settings and encrypts API keys with the operating system credential store; browser and Docker keys remain session-only. Keys are sent only to the Canvasly server handling that request.
 
 | Provider | Protocol | Default endpoint |
 | --- | --- | --- |
@@ -331,7 +336,7 @@ flowchart LR
 
 ## Safety model
 
-- API keys are never written to local storage, logs, or project files.
+- Desktop API keys are stored only as Keychain / DPAPI ciphertext, never in collaboration state, logs, or project files. Browser and Docker do not persist keys.
 - The desktop app binds its bundled service to a random `127.0.0.1` port and writes project state to the operating system's app-data directory.
 - Desktop updates accept GitHub Release checksum metadata; production releases should additionally rely on macOS and Windows code signing.
 - Remote model endpoints must use HTTPS.
@@ -347,13 +352,19 @@ flowchart LR
 ```text
 app/
   api/transform/route.ts   provider adapters, validation, endpoint security
-  desktop-api.ts           Electron bridge types and update state
+  api/stream/route.ts      standard SSE for Auto/Plan/Agent
+  api/_lib/                provider stream translation, citations, retries
+  desktop-api.ts           Electron bridge and persistence types
   editor-data.ts           presets, starter HTML, prompt suggestions
-  page.tsx                 canvas, collaboration modes, Agent queue, history
+  stream-client.ts         frontend SSE parser and normalized events
+  page.tsx                 canvas, unified Agent, plans, queue, history
   globals.css              responsive workbench and interaction styling
 desktop/
   main.mjs                 window, local server, persistence, and updater
   preload.cjs              minimal-privilege IPC bridge
+  credential-vault.mjs     Keychain / DPAPI encrypted credential slots
+  collaboration-state.mjs  unified history, plans, paused queue, sidebar state
+  attachment-store.mjs     secure attachment payload storage
   build.mjs                cross-platform standalone build
   bundle.mjs               minimal Electron main-process bundle
 tools/
@@ -374,7 +385,9 @@ compose.yaml               Self-hosted services
 ```bash
 npm run lint
 npm test
+npm run test:stream
 npm run test:desktop
+npm run test:desktop-app
 node --check tools/copilot-bridge.mjs
 ```
 
@@ -385,12 +398,12 @@ Start the Docker app before running E2E tests. Browser tests use an installed Mi
 ```bash
 ./install.sh
 npm run test:api       # 16 deterministic API contract cases
-npm run test:browser   # 15 deterministic UI and workflow cases
-npm run test:model     # 19 real local gpt-5.5 scenarios, 25 requests total
+npm run test:browser   # 23 deterministic UI and workflow cases
+npm run test:model     # 25 real local gpt-5.5 scenarios
 npm run test:e2e       # all three suites in sequence
 ```
 
-`test:model` uses the Responses-compatible endpoint at `http://host.docker.internal:4141/v1` in Docker with model `gpt-5.5`; for a directly started standalone server, set `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`. It covers page creation, component editing, exact insertion, drawing context, large pages, sequential edits, concurrency, navigation, safety, and a real browser flow. The report is written to `.sites-runtime/test-reports/local-model.json`.
+`test:model` uses the Responses-compatible endpoint at `http://host.docker.internal:4141/v1` in Docker with model `gpt-5.5`; for a directly started standalone server, set `CANVASLY_MODEL_ENDPOINT=http://127.0.0.1:4141/v1`. It covers page creation, component editing, exact insertion, drawing context, large pages, sequential edits, Auto routing, Plan, high-level Agent planning, stop behavior, navigation, safety, and a real browser flow. The report is written to `.sites-runtime/test-reports/local-model.json`.
 
 On macOS, `npm test` requires GNU `timeout`; the equivalent underlying validation is:
 
@@ -402,7 +415,7 @@ node --test tests/rendered-html.test.mjs
 
 ## Current scope
 
-The desktop app automatically stores projects and version history on the local computer. Docker/browser sessions still live only in the current tab. Cloud synchronization, collaborative multiplayer editing, reusable component libraries, and a visual property inspector remain future work.
+The desktop app automatically stores projects, versions, unified conversation, plans, citations, paused queue, attachments, and sidebar state on the local computer. Docker/browser state still lives only in the current tab. Cloud synchronization, collaborative multiplayer editing, reusable component libraries, and a visual property inspector remain future work.
 
 ---
 

@@ -27,6 +27,40 @@ contextBridge.exposeInMainWorld(
         "desktop:preferences:save-sync",
         preferences,
       ),
+    loadCollaboration: () =>
+      ipcRenderer.invoke("desktop:collaboration:load"),
+    quarantineCollaboration: () =>
+      ipcRenderer.invoke("desktop:collaboration:quarantine"),
+    saveCollaboration: (state) =>
+      ipcRenderer.invoke("desktop:collaboration:save", state),
+    saveCollaborationBeforeUnload: (state) =>
+      ipcRenderer.sendSync(
+        "desktop:collaboration:save-sync",
+        state,
+      ),
+    getCredentialStatus: (slot) =>
+      ipcRenderer.invoke("desktop:credential:status", slot),
+    readCredential: (slot) =>
+      ipcRenderer.invoke("desktop:credential:read", slot),
+    writeCredential: (slot, value) =>
+      ipcRenderer.invoke("desktop:credential:write", slot, value),
+    clearCredential: (slot) =>
+      ipcRenderer.invoke("desktop:credential:clear", slot),
+    storeCollaborationAttachment: (attachment) =>
+      ipcRenderer.invoke(
+        "desktop:collaboration-attachment:store",
+        attachment,
+      ),
+    readCollaborationAttachment: (reference) =>
+      ipcRenderer.invoke(
+        "desktop:collaboration-attachment:read",
+        reference,
+      ),
+    deleteCollaborationAttachment: (reference) =>
+      ipcRenderer.invoke(
+        "desktop:collaboration-attachment:delete",
+        reference,
+      ),
     getUpdateState: () => ipcRenderer.invoke("desktop:update:get-state"),
     checkForUpdates: () => ipcRenderer.invoke("desktop:update:check"),
     downloadUpdate: () => ipcRenderer.invoke("desktop:update:download"),

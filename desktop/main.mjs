@@ -7,6 +7,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  safeStorage,
   session,
   shell,
 } from "electron";
@@ -23,6 +24,22 @@ import {
   writeProjectSnapshot,
   writeProjectSnapshotSync,
 } from "./project-state.mjs";
+import {
+  DESKTOP_COLLABORATION_FILE_NAME,
+  normalizeCollaborationState,
+  quarantineCollaborationState,
+  readCollaborationState,
+  writeCollaborationState,
+  writeCollaborationStateSync,
+} from "./collaboration-state.mjs";
+import {
+  createCredentialVault,
+  DESKTOP_CREDENTIAL_FILE_NAME,
+} from "./credential-vault.mjs";
+import {
+  createCollaborationAttachmentStore,
+  DESKTOP_COLLABORATION_ATTACHMENTS_DIRECTORY,
+} from "./collaboration-attachments.mjs";
 import {
   isExternalHttpUrl,
   isTrustedAppNavigation,
@@ -50,6 +67,8 @@ let projectSaveGeneration = 0;
 let projectSaveQueue = Promise.resolve();
 let preferencesSaveGeneration = 0;
 let preferencesSaveQueue = Promise.resolve();
+let collaborationSaveGeneration = 0;
+let collaborationSaveQueue = Promise.resolve();
 let updateState = {
   status: app.isPackaged ? "idle" : "unsupported",
   currentVersion: app.getVersion(),
@@ -80,6 +99,21 @@ function projectFilePath() {
 
 function preferencesFilePath() {
   return path.join(app.getPath("userData"), DESKTOP_PREFERENCES_FILE_NAME);
+}
+
+function collaborationFilePath() {
+  return path.join(app.getPath("userData"), DESKTOP_COLLABORATION_FILE_NAME);
+}
+
+function credentialFilePath() {
+  return path.join(app.getPath("userData"), DESKTOP_CREDENTIAL_FILE_NAME);
+}
+
+function collaborationAttachmentsDirectoryPath() {
+  return path.join(
+    app.getPath("userData"),
+    DESKTOP_COLLABORATION_ATTACHMENTS_DIRECTORY,
+  );
 }
 
 function queueProjectSave(snapshot) {
@@ -130,6 +164,28 @@ function savePreferencesBeforeUnload(preferences) {
     preferencesFilePath(),
     validatedPreferences,
   );
+}
+
+function queueCollaborationSave(state) {
+  const validatedState = normalizeCollaborationState(state);
+  const generation = ++collaborationSaveGeneration;
+  const operation = collaborationSaveQueue.then(() =>
+    writeCollaborationState(collaborationFilePath(), validatedState, {
+      shouldCommit: () => generation === collaborationSaveGeneration,
+    }));
+  collaborationSaveQueue = operation.catch((error) => {
+    log(
+      "error",
+      `Desktop collaboration save failed: ${updaterErrorMessage(error)}`,
+    );
+  });
+  return operation;
+}
+
+function saveCollaborationBeforeUnload(state) {
+  const validatedState = normalizeCollaborationState(state);
+  collaborationSaveGeneration += 1;
+  writeCollaborationStateSync(collaborationFilePath(), validatedState);
 }
 
 function assertTrustedSender(event) {
@@ -230,6 +286,13 @@ async function checkForUpdates() {
 }
 
 function registerDesktopIpc() {
+  const credentialVault = createCredentialVault({
+    filePath: credentialFilePath(),
+    safeStorage,
+  });
+  const collaborationAttachments = createCollaborationAttachmentStore({
+    directoryPath: collaborationAttachmentsDirectoryPath(),
+  });
   ipcMain.handle("desktop:get-info", (event) => {
     assertTrustedSender(event);
     return {
@@ -285,6 +348,87 @@ function registerDesktopIpc() {
         );
         event.returnValue = { ok: false, message };
       }
+    },
+  );
+  ipcMain.handle("desktop:collaboration:load", async (event) => {
+    assertTrustedSender(event);
+    return readCollaborationState(collaborationFilePath());
+  });
+  ipcMain.handle(
+    "desktop:collaboration:quarantine",
+    async (event) => {
+      assertTrustedSender(event);
+      const backupPath = await quarantineCollaborationState(
+        collaborationFilePath(),
+      );
+      const backupName = path.basename(backupPath);
+      log(
+        "error",
+        `Unreadable collaboration state moved to ${backupName}`,
+      );
+      return { backupName };
+    },
+  );
+  ipcMain.handle(
+    "desktop:collaboration:save",
+    async (event, collaborationState) => {
+      assertTrustedSender(event);
+      await queueCollaborationSave(collaborationState);
+      return { savedAt: new Date().toISOString() };
+    },
+  );
+  ipcMain.on(
+    "desktop:collaboration:save-sync",
+    (event, collaborationState) => {
+      try {
+        assertTrustedSender(event);
+        saveCollaborationBeforeUnload(collaborationState);
+        event.returnValue = { ok: true };
+      } catch (error) {
+        const message = updaterErrorMessage(error);
+        log(
+          "error",
+          `Failed to save collaboration before unload: ${message}`,
+        );
+        event.returnValue = { ok: false, message };
+      }
+    },
+  );
+  ipcMain.handle("desktop:credential:status", (event, slot) => {
+    assertTrustedSender(event);
+    return credentialVault.status(slot);
+  });
+  ipcMain.handle("desktop:credential:read", (event, slot) => {
+    assertTrustedSender(event);
+    return credentialVault.read(slot);
+  });
+  ipcMain.handle("desktop:credential:write", (event, slot, value) => {
+    assertTrustedSender(event);
+    return credentialVault.write(slot, value);
+  });
+  ipcMain.handle("desktop:credential:clear", (event, slot) => {
+    assertTrustedSender(event);
+    return credentialVault.clear(slot);
+  });
+  ipcMain.handle(
+    "desktop:collaboration-attachment:store",
+    (event, attachment) => {
+      assertTrustedSender(event);
+      return collaborationAttachments.store(attachment);
+    },
+  );
+  ipcMain.handle(
+    "desktop:collaboration-attachment:read",
+    (event, reference) => {
+      assertTrustedSender(event);
+      return collaborationAttachments.read(reference);
+    },
+  );
+  ipcMain.handle(
+    "desktop:collaboration-attachment:delete",
+    (event, reference) => {
+      assertTrustedSender(event);
+      return collaborationAttachments.delete(reference);
     },
   );
   ipcMain.handle("desktop:update:get-state", (event) => {
