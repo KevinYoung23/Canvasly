@@ -94,6 +94,18 @@ test.before(async () => {
       response.end("not json");
       return;
     }
+    if (model === "complex-response") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+      });
+      response.end(
+        `{"output_text":"ok","padding":[${Array.from(
+          { length: 20_000 },
+          () => "{}",
+        ).join(",")}]}`,
+      );
+      return;
+    }
     if (model === "upstream-error") {
       response.writeHead(429, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "quota probe" } }));
@@ -175,6 +187,18 @@ test("rejects malformed JSON", async () => {
   assert.match(payload.error, /有效的 JSON/);
 });
 
+test("rejects structurally complex JSON before parsing", async () => {
+  const complexJson = `{"padding":[${Array.from(
+    { length: 20_000 },
+    () => "{}",
+  ).join(",")}]}`;
+  const { response, payload } = await post(complexJson, {
+    raw: true,
+  });
+  assert.equal(response.status, 400);
+  assert.match(payload.error, /结构过于复杂/);
+});
+
 test("rejects non-JSON and cross-origin private endpoint requests", async () => {
   const nonJson = await fetch(`${canvaslyUrl}/api/transform`, {
     method: "POST",
@@ -221,7 +245,20 @@ test("rejects credentials embedded in endpoint URLs", async () => {
 });
 
 test("enforces HTML and instruction limits", async () => {
-  const oversizedHtml = await post(validBody({ html: `<!doctype html><body>${"x".repeat(300_001)}</body>` }));
+  const formerlyOversizedHtml = await post(
+    validBody({
+      html: `<!doctype html><body>${"x".repeat(300_001)}</body>`,
+    }),
+  );
+  assert.equal(formerlyOversizedHtml.response.status, 200);
+
+  const oversizedHtml = await post(
+    validBody({
+      html: `<!doctype html><body>${"x".repeat(
+        5 * 1024 * 1024 + 1,
+      )}</body>`,
+    }),
+  );
   assert.equal(oversizedHtml.response.status, 400);
   assert.match(oversizedHtml.payload.error, /HTML 不能为空且不能超过/);
 
@@ -278,6 +315,19 @@ test("rejects redirects, non-JSON responses, and upstream errors", async () => {
     assert.equal(response.status, 502);
     assert.match(payload.error, expected);
   }
+});
+
+test("rejects structurally complex provider responses", async () => {
+  const { response, payload } = await post(
+    validBody({
+      config: {
+        ...validBody().config,
+        model: "complex-response",
+      },
+    }),
+  );
+  assert.equal(response.status, 502);
+  assert.match(payload.error, /JSON 结构过于复杂/);
 });
 
 test("Chat returns advice without HTML", async () => {

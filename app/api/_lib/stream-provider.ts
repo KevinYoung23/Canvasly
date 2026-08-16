@@ -1,5 +1,4 @@
 import {
-  MAX_HTML_LENGTH,
   MAX_INSTRUCTION_LENGTH,
   asRecord,
   buildSystemPrompt,
@@ -20,6 +19,19 @@ import {
   type ProviderProtocol,
   type SelectionContext,
 } from "../transform/route";
+import {
+  MAX_HTML_LENGTH,
+  MAX_MODEL_REQUEST_BYTES,
+  MAX_MODEL_RESPONSE_BYTES,
+  MAX_MODEL_STREAM_TEXT_LENGTH,
+} from "./limits";
+import {
+  createJsonStructureScanner,
+  JsonStructureTooComplexError,
+  parseJsonBounded,
+  readRequestTextBounded,
+  RequestBodyTooLargeError,
+} from "./request-body";
 import {
   SSEChunkParser,
   encodeSSE,
@@ -86,11 +98,10 @@ export type UnifiedDecision = {
   summary: string;
 };
 
-const MAX_REQUEST_LENGTH = 8_000_000;
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_ITEM = 8_000;
 const MAX_HISTORY_TOTAL = 80_000;
-const MAX_STREAM_OUTPUT = 1_000_000;
+const MAX_STREAM_OUTPUT = MAX_MODEL_STREAM_TEXT_LENGTH;
 const MAX_PROVIDER_ERROR_BYTES = 20_000;
 const MODEL_TIMEOUT_MS = 240_000;
 const MAX_ATTEMPTS = 3;
@@ -265,7 +276,7 @@ export function parseUnifiedDecision(
     .replace(/\s*```$/i, "");
   let parsed: Record<string, unknown> | null;
   try {
-    parsed = asRecord(JSON.parse(trimmed));
+    parsed = asRecord(parseJsonBounded(trimmed));
   } catch {
     throw new StructuredOutputError(
       "自动模式没有返回有效的路由 JSON",
@@ -515,19 +526,6 @@ function parseCoworkOutput(
   currentHtml: string,
   instruction: string,
 ) {
-  const normalized = text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "");
-  if (normalized.startsWith("{")) {
-    try {
-      JSON.parse(normalized);
-    } catch {
-      throw new StructuredOutputError(
-        "模型返回了不完整或格式错误的 Cowork JSON",
-      );
-    }
-  }
   let parsed: ReturnType<typeof parseModelResult>;
   try {
     parsed = parseModelResult(text, "cowork");
@@ -638,48 +636,11 @@ async function responseError(response: Response) {
     MAX_PROVIDER_ERROR_BYTES,
   );
   try {
-    const payload = asRecord(JSON.parse(text));
+    const payload = asRecord(parseJsonBounded(text));
     const nested = asRecord(payload?.error);
     return stringValue(nested?.message ?? payload?.message, 1_000) || `HTTP ${response.status}`;
   } catch {
     return text.trim().slice(0, 1_000) || `HTTP ${response.status}`;
-  }
-}
-
-async function readRequestTextBounded(
-  request: Request,
-  maxBytes: number,
-) {
-  if (!request.body) return "";
-  const reader = request.body.getReader();
-  const decoder = new TextDecoder();
-  let raw = "";
-  let bytesRead = 0;
-  let completed = false;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        completed = true;
-        return raw + decoder.decode();
-      }
-      if (value.byteLength > maxBytes - bytesRead) {
-        throw new HttpError(
-          "请求内容过大",
-          413,
-          "request_too_large",
-        );
-      }
-      bytesRead += value.byteLength;
-      raw += decoder.decode(value, { stream: true });
-    }
-  } finally {
-    if (!completed) {
-      await reader
-        .cancel("request body exceeded size limit")
-        .catch(() => undefined);
-    }
-    reader.releaseLock();
   }
 }
 
@@ -801,7 +762,7 @@ export function parseMissionPlan(text: string, apiKey?: string): MissionPlan {
     .replace(/\s*```$/i, "");
   let parsed: Record<string, unknown> | null;
   try {
-    parsed = asRecord(JSON.parse(trimmed));
+    parsed = asRecord(parseJsonBounded(trimmed));
   } catch {
     throw new StructuredOutputError("规划模型返回了不完整或格式错误的 JSON");
   }
@@ -847,7 +808,9 @@ export function parseHandoff(text: string, apiKey?: string) {
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("模型没有返回有效的交接卡");
-  const parsed = asRecord(JSON.parse(trimmed.slice(start, end + 1)));
+  const parsed = asRecord(
+    parseJsonBounded(trimmed.slice(start, end + 1)),
+  );
   if (!parsed) throw new Error("模型没有返回有效的交接卡");
   const clean = secretCleaner(apiKey);
   const title = clean(stringValue(parsed.title, 180));
@@ -1002,19 +965,29 @@ async function consumeUpstream(
     const reader = response.body.getReader();
     setReader(reader);
     const decoder = new TextDecoder();
+    const structure = createJsonStructureScanner();
     let raw = "";
+    let responseBytes = 0;
     let responseRead = false;
     try {
       while (true) {
         if (signal.aborted) throw signal.reason;
         const { value, done } = await reader.read();
         if (done) break;
-        raw += decoder.decode(value, { stream: true });
-        if (raw.length > MAX_STREAM_OUTPUT) {
+        if (
+          value.byteLength >
+          MAX_MODEL_RESPONSE_BYTES - responseBytes
+        ) {
           throw new Error("模型响应内容过大");
         }
+        responseBytes += value.byteLength;
+        const decoded = decoder.decode(value, { stream: true });
+        structure.push(decoded);
+        raw += decoded;
       }
-      raw += decoder.decode();
+      const tail = decoder.decode();
+      structure.push(tail);
+      raw += tail;
       responseRead = true;
     } finally {
       if (signal.aborted || !responseRead) {
@@ -1028,7 +1001,10 @@ async function consumeUpstream(
     let payload: unknown;
     try {
       payload = JSON.parse(raw);
-    } catch {
+    } catch (error) {
+      if (error instanceof JsonStructureTooComplexError) {
+        throw error;
+      }
       throw new Error("模型返回了格式错误的 JSON 响应");
     }
     const root = asRecord(payload);
@@ -1044,6 +1020,9 @@ async function consumeUpstream(
     }
     const extracted = extractText(payload, protocol);
     if (!extracted) throw new Error("模型返回内容为空");
+    if (extracted.length > MAX_STREAM_OUTPUT) {
+      throw new Error("模型响应内容过大");
+    }
     state.text = extracted;
     for (const citation of providerPayloadCitations(
       protocol,
@@ -1686,14 +1665,25 @@ export async function streamPost(request: Request) {
         "unsupported_media_type",
       );
     }
-    const declaredLength = Number(request.headers.get("content-length") || "0");
-    if (declaredLength > MAX_REQUEST_LENGTH) {
-      throw new HttpError("请求内容过大", 413, "request_too_large");
+    let raw: string;
+    try {
+      raw = await readRequestTextBounded(
+        request,
+        MAX_MODEL_REQUEST_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        throw new HttpError(
+          error.message,
+          413,
+          "request_too_large",
+        );
+      }
+      if (error instanceof JsonStructureTooComplexError) {
+        throw new HttpError(error.message);
+      }
+      throw error;
     }
-    const raw = await readRequestTextBounded(
-      request,
-      MAX_REQUEST_LENGTH,
-    );
     let body: StreamBody;
     try {
       body = JSON.parse(raw) as StreamBody;

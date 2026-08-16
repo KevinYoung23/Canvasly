@@ -1,3 +1,6 @@
+import { MAX_PROVIDER_EVENT_LENGTH } from "./limits";
+import { parseJsonBounded } from "./request-body";
+
 export type ProviderProtocol =
   | "openai-responses"
   | "openai-chat"
@@ -21,8 +24,6 @@ export type ProviderStreamItem =
   | { type: "done" }
   | { type: "error"; message: string };
 
-const MAX_PROVIDER_EVENT = 1_000_000;
-
 export class SSEChunkParser {
   private buffer = "";
   private eventName = "message";
@@ -31,9 +32,6 @@ export class SSEChunkParser {
 
   push(chunk: string): ParsedSSEEvent[] {
     this.buffer += chunk;
-    if (this.buffer.length > MAX_PROVIDER_EVENT) {
-      throw new Error("模型流事件过大");
-    }
     const events: ParsedSSEEvent[] = [];
     let newline = this.buffer.indexOf("\n");
     while (newline >= 0) {
@@ -41,6 +39,9 @@ export class SSEChunkParser {
       this.buffer = this.buffer.slice(newline + 1);
       this.consumeLine(line, events);
       newline = this.buffer.indexOf("\n");
+    }
+    if (this.buffer.length > MAX_PROVIDER_EVENT_LENGTH) {
+      throw new Error("模型流事件过大");
     }
     return events;
   }
@@ -66,7 +67,7 @@ export class SSEChunkParser {
     if (field === "event") this.eventName = value || "message";
     if (field === "data") {
       this.dataLength += value.length + (this.dataLines.length ? 1 : 0);
-      if (this.dataLength > MAX_PROVIDER_EVENT) {
+      if (this.dataLength > MAX_PROVIDER_EVENT_LENGTH) {
         throw new Error("模型流事件过大");
       }
       this.dataLines.push(value);
@@ -236,7 +237,7 @@ export function translateProviderEvent(
   if (event.data === "[DONE]") return [{ type: "done" }];
   let payload: unknown;
   try {
-    payload = JSON.parse(event.data);
+    payload = parseJsonBounded(event.data);
   } catch {
     throw new Error("模型返回了格式错误的流事件");
   }

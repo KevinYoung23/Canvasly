@@ -108,6 +108,20 @@ test("parses split, CRLF, multiline SSE chunks and translates provider deltas", 
   assert.deepEqual(translated, [{ type: "delta", text: "Hello" }]);
 });
 
+test("accepts multiple bounded SSE events delivered in one large chunk", () => {
+  const parser = new sseModule.SSEChunkParser();
+  const combined = Array.from(
+    { length: 6 },
+    (_, index) =>
+      `event: part-${index}\ndata: ${"x".repeat(200_000)}\n\n`,
+  ).join("");
+  const parsed = parser.push(combined);
+  assert.equal(parsed.length, 6);
+  assert.ok(
+    parsed.every((event) => event.data.length === 200_000),
+  );
+});
+
 test("streams Chat deltas and normalized safe citations", async () => {
   globalThis.fetch = async () =>
     providerStream([
@@ -133,6 +147,31 @@ test("streams Chat deltas and normalized safe citations", async () => {
     event: "done",
     data: { stopped: false },
   });
+});
+
+test("accepts HTML above the former 300,000 character limit", async () => {
+  globalThis.fetch = async () =>
+    providerStream([
+      'data: {"choices":[{"delta":{"content":"Large page accepted"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+  const output = events(
+    await (
+      await POST(
+        request(
+          body({
+            html: `<!doctype html><html><body>${"x".repeat(
+              300_001,
+            )}</body></html>`,
+          }),
+        ),
+      )
+    ).text(),
+  );
+  assert.equal(
+    output.find((item) => item.event === "result").data.reply,
+    "Large page accepted",
+  );
 });
 
 test("buffers Cowork JSON, emits factual phases, then validates result", async () => {
@@ -170,6 +209,56 @@ test("buffers Cowork JSON, emits factual phases, then validates result", async (
     ["connecting", "classification", "generating", "validating"],
   );
   assert.equal(result.find((item) => item.event === "result").data.status, "completed");
+});
+
+test("accepts full-page output above the former one-million character limit", async () => {
+  const report = JSON.stringify({
+    status: "completed",
+    html: `<!doctype html><html><body>${"x".repeat(
+      1_050_000,
+    )}</body></html>`,
+    summary: "Returned the complete large page",
+    updates: ["Preserved the full document"],
+    issues: [],
+    suggestions: [],
+  });
+  globalThis.fetch = async () =>
+    providerStream([
+      ...Array.from(
+        { length: Math.ceil(report.length / 200_000) },
+        (_, index) =>
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  content: report.slice(
+                    index * 200_000,
+                    (index + 1) * 200_000,
+                  ),
+                },
+              },
+            ],
+          })}\n\n`,
+      ),
+      "data: [DONE]\n\n",
+    ]);
+  const output = events(
+    await (
+      await POST(
+        request(
+          body({
+            mode: "cowork",
+            coworkStrategy: "direct",
+          }),
+        ),
+      )
+    ).text(),
+  );
+  const result = output.find(
+    (item) => item.event === "result",
+  ).data;
+  assert.equal(result.status, "completed");
+  assert.ok(result.html.length > 1_000_000);
 });
 
 test("retries malformed Cowork JSON once with an exact-format correction", async () => {
@@ -215,6 +304,44 @@ test("retries malformed Cowork JSON once with an exact-format correction", async
   assert.equal(
     result.find((item) => item.event === "result").data.summary,
     "Corrected output",
+  );
+});
+
+test("rejects structurally complex Cowork model output", async () => {
+  let calls = 0;
+  const complex = `{"status":"blocked","summary":"Stop","padding":[${Array.from(
+    { length: 20_000 },
+    () => "{}",
+  ).join(",")}],"updates":[],"issues":[],"suggestions":[]}`;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return providerStream([
+      `data: ${JSON.stringify({
+        choices: [{ delta: { content: complex } }],
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ]);
+  };
+  const output = events(
+    await (
+      await POST(
+        request(
+          body({
+            mode: "cowork",
+            coworkStrategy: "direct",
+          }),
+        ),
+      )
+    ).text(),
+  );
+  assert.equal(calls, 2);
+  assert.equal(
+    output.some((item) => item.event === "result"),
+    false,
+  );
+  assert.match(
+    output.find((item) => item.event === "error").data.message,
+    /JSON 结构过于复杂/,
   );
 });
 
@@ -662,8 +789,23 @@ test("reports malformed provider streams and enforces security limits", async ()
   assert.equal(oversized.status, 400);
   assert.equal(events(await oversized.text())[0].data.code, "invalid_request");
 
+  const oversizedHtml = await POST(
+    request(
+      body({
+        html: `<!doctype html><html><body>${"x".repeat(
+          5 * 1024 * 1024 + 1,
+        )}</body></html>`,
+      }),
+    ),
+  );
+  assert.equal(oversizedHtml.status, 400);
+  assert.match(
+    events(await oversizedHtml.text())[0].data.message,
+    /5,242,880/,
+  );
+
   const declared = await POST(
-    request(body(), undefined, { "content-length": "8000001" }),
+    request(body(), undefined, { "content-length": "16777217" }),
   );
   assert.equal(declared.status, 413);
 });
@@ -1095,10 +1237,12 @@ test("preserves terminal completion when the final event contains citations", as
 
 test("SSE parser rejects cumulative multiline event overflow", () => {
   const parser = new sseModule.SSEChunkParser();
-  const line = `data: ${"x".repeat(2_000)}\n`;
+  const line = `data: ${"x".repeat(20_000)}\n`;
   assert.throws(
     () => {
-      for (let index = 0; index < 600; index += 1) parser.push(line);
+      for (let index = 0; index < 700; index += 1) {
+        parser.push(line);
+      }
     },
     /事件过大/,
   );
@@ -1244,14 +1388,43 @@ test("bounds and cancels oversized provider error bodies", async () => {
   assert.ok(message.length < 2_000);
 });
 
-test("rejects chunked multibyte request bodies above eight megabytes", async () => {
-  const oversizedInstruction = "界".repeat(3_000_000);
+test("rejects structurally complex nonstream provider envelopes", async () => {
+  globalThis.fetch = async () =>
+    new Response(
+      `{"output_text":"ok","padding":[${Array.from(
+        { length: 20_000 },
+        () => "{}",
+      ).join(",")}]}`,
+      { headers: { "content-type": "application/json" } },
+    );
+  const output = events(
+    await (await POST(request(body()))).text(),
+  );
+  assert.equal(
+    output.some((item) => item.event === "result"),
+    false,
+  );
+  assert.match(
+    output.find((item) => item.event === "error").data.message,
+    /JSON 结构过于复杂/,
+  );
+});
+
+test("rejects chunked request bodies above 16 megabytes", async () => {
+  const chunk = new Uint8Array(9 * 1024 * 1024);
   const response = await POST(
-    request(
-      body({
-        instruction: oversizedInstruction,
+    new Request("https://canvasly.example/api/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(chunk);
+          controller.enqueue(chunk);
+          controller.close();
+        },
       }),
-    ),
+      duplex: "half",
+    }),
   );
   assert.equal(response.status, 413);
   const output = events(await response.text());
@@ -1259,6 +1432,30 @@ test("rejects chunked multibyte request bodies above eight megabytes", async () 
     output.find((item) => item.event === "error").data.code,
     "request_too_large",
   );
+});
+
+test("rejects structurally complex JSON before provider execution", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return providerStream(["data: [DONE]\n\n"]);
+  };
+  const response = await POST(
+    new Request("https://canvasly.example/api/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: `{"mode":"chat","padding":[${Array.from(
+        { length: 20_000 },
+        () => "{}",
+      ).join(",")}]}`,
+    }),
+  );
+  assert.equal(response.status, 400);
+  assert.match(
+    events(await response.text())[0].data.message,
+    /结构过于复杂/,
+  );
+  assert.equal(calls, 0);
 });
 
 test("does not contact the provider when the request was already aborted", async () => {

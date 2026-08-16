@@ -11,6 +11,9 @@ const client = new CopilotClient({
 });
 let clientStarted = false;
 let activeRequests = 0;
+const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
+const MAX_JSON_DEPTH = 64;
+const MAX_JSON_STRUCTURAL_TOKENS = 50_000;
 
 function writeJson(response, status, payload) {
   response.writeHead(status, {
@@ -27,12 +30,51 @@ function isAuthorized(request) {
 
 async function readJson(request) {
   let body = "";
+  let bytesRead = 0;
+  const decoder = new TextDecoder();
+  const structure = {
+    depth: 0,
+    structuralTokens: 0,
+    inString: false,
+    escaped: false,
+  };
   for await (const chunk of request) {
-    body += chunk;
-    if (body.length > 8_000_000) {
+    bytesRead += chunk.byteLength;
+    if (bytesRead > MAX_REQUEST_BYTES) {
       throw new Error("Request is too large");
     }
+    const decoded = decoder.decode(chunk, { stream: true });
+    for (const character of decoded) {
+      if (structure.inString) {
+        if (structure.escaped) structure.escaped = false;
+        else if (character === "\\") structure.escaped = true;
+        else if (character === '"') structure.inString = false;
+        continue;
+      }
+      if (character === '"') {
+        structure.inString = true;
+      } else if (character === "{" || character === "[") {
+        structure.depth += 1;
+        structure.structuralTokens += 1;
+        if (structure.depth > MAX_JSON_DEPTH) {
+          throw new Error("Request JSON is nested too deeply");
+        }
+      } else if (character === "}" || character === "]") {
+        structure.depth -= 1;
+        structure.structuralTokens += 1;
+      } else if (character === "," || character === ":") {
+        structure.structuralTokens += 1;
+      }
+      if (
+        structure.structuralTokens >
+        MAX_JSON_STRUCTURAL_TOKENS
+      ) {
+        throw new Error("Request JSON is too complex");
+      }
+    }
+    body += decoded;
   }
+  body += decoder.decode();
   return JSON.parse(body);
 }
 
@@ -164,15 +206,7 @@ const server = createServer(async (request, response) => {
         status: "completed",
         model,
         output_text: content,
-        output: [
-          {
-            id: `${id}-message`,
-            type: "message",
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: content, annotations: [] }],
-          },
-        ],
+        output: [],
       });
     }
 

@@ -1,6 +1,20 @@
 export const runtime = "edge";
 
 import { wouldReplacePageWithBlank } from "../../html-safety";
+import {
+  MAX_HTML_LENGTH,
+  MAX_MODEL_REQUEST_BYTES,
+  MAX_MODEL_RESPONSE_BYTES,
+  MAX_MODEL_STREAM_TEXT_LENGTH,
+} from "../_lib/limits";
+import {
+  JsonStructureTooComplexError,
+  parseJsonBounded,
+  readRequestTextBounded,
+  readResponseJsonBounded,
+  RequestBodyTooLargeError,
+  ResponseBodyTooLargeError,
+} from "../_lib/request-body";
 
 export type ProviderProtocol =
   | "openai-responses"
@@ -83,7 +97,7 @@ export type CoworkResult = {
 
 type ParsedModelResult = { reply: string } | CoworkResult;
 
-export const MAX_HTML_LENGTH = 300_000;
+export { MAX_HTML_LENGTH };
 export const MAX_INSTRUCTION_LENGTH = 12_000;
 export const MAX_DOCUMENT_CONTEXT = 120_000;
 export const MAX_IMAGE_DATA = 5_700_000;
@@ -571,9 +585,20 @@ export function parseModelResult(text: string, mode: CollaborationMode): ParsedM
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
+  if (
+    mode === "cowork" &&
+    firstBrace === 0 &&
+    lastBrace <= firstBrace
+  ) {
+    throw new Error("模型返回了不完整或格式错误的 Cowork JSON");
+  }
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     try {
-      const parsed = asRecord(JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)));
+      const parsed = asRecord(
+        parseJsonBounded(
+          trimmed.slice(firstBrace, lastBrace + 1),
+        ),
+      );
       if (mode === "chat" && typeof parsed?.reply === "string") {
         return { reply: parsed.reply };
       }
@@ -617,7 +642,13 @@ export function parseModelResult(text: string, mode: CollaborationMode): ParsedM
       if (mode === "chat" && trimmed) {
         return { reply: trimmed };
       }
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof JsonStructureTooComplexError ||
+        (mode === "cowork" && trimmed.startsWith("{"))
+      ) {
+        throw error;
+      }
       // Fall through to broadly compatible text or HTML extraction.
     }
   }
@@ -672,15 +703,20 @@ export async function POST(request: Request) {
   if (!contentType.toLowerCase().startsWith("application/json")) {
     return jsonError("请求必须使用 application/json", 415);
   }
-  const contentLength = Number(request.headers.get("content-length") || "0");
-  if (contentLength > 8_000_000) {
-    return jsonError("请求内容过大", 413);
-  }
-
   let body: TransformBody;
   try {
-    body = (await request.json()) as TransformBody;
-  } catch {
+    const raw = await readRequestTextBounded(
+      request,
+      MAX_MODEL_REQUEST_BYTES,
+    );
+    body = JSON.parse(raw) as TransformBody;
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonError(error.message, 413);
+    }
+    if (error instanceof JsonStructureTooComplexError) {
+      return jsonError(error.message);
+    }
     return jsonError("请求不是有效的 JSON");
   }
 
@@ -755,7 +791,10 @@ export async function POST(request: Request) {
         break;
       }
       try {
-        payload = await upstream.json();
+        payload = await readResponseJsonBounded(
+          upstream,
+          MAX_MODEL_RESPONSE_BYTES,
+        );
       } catch (error) {
         if (isRetryableConnectionError(error)) {
           connectionError = error;
@@ -797,6 +836,12 @@ export async function POST(request: Request) {
   }
 
   if (payloadError) {
+    if (
+      payloadError instanceof ResponseBodyTooLargeError ||
+      payloadError instanceof JsonStructureTooComplexError
+    ) {
+      return jsonError(payloadError.message, 502);
+    }
     return jsonError(`模型节点返回了非 JSON 响应（HTTP ${upstream.status}）`, 502);
   }
 
@@ -811,7 +856,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = parseModelResult(extractText(payload, config.protocol), mode);
+    const extracted = extractText(payload, config.protocol);
+    if (extracted.length > MAX_MODEL_STREAM_TEXT_LENGTH) {
+      throw new Error("模型返回内容过大");
+    }
+    const result = parseModelResult(extracted, mode);
     if (mode === "cowork") validateCoworkResult(result, html, instruction);
     return Response.json(result, {
       headers: { "cache-control": "no-store" },
